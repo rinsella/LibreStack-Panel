@@ -77,8 +77,12 @@ class PhpFpmService
     /**
      * Build the pool configuration for a user. The pool runs as {username} and
      * confines PHP with open_basedir + disabled dangerous functions.
+     *
+     * @param  array<string, string>  $settings  Managed php.ini overrides
+     *                                            (validated) to inject as
+     *                                            php_admin_value entries.
      */
-    public function poolConfig(string $username, string $phpVersion): string
+    public function poolConfig(string $username, string $phpVersion, array $settings = []): string
     {
         $this->assertUsername($username);
         $this->assertPhpVersion($phpVersion);
@@ -86,7 +90,7 @@ class PhpFpmService
         $webRoot = rtrim((string) config('librestack.paths.web_root'), '/');
         $socket = $this->socketPath($username);
 
-        return <<<CONF
+        $config = <<<CONF
 [librestack-{$username}]
 user = {$username}
 group = {$username}
@@ -102,19 +106,29 @@ php_admin_value[open_basedir] = {$webRoot}/{$username}/web:/tmp
 php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen
 
 CONF;
+
+        // Inject the managed php.ini directives. Every value is re-validated here
+        // so a malformed value can never reach the pool file (defence in depth).
+        foreach (PhpSettings::sanitize($settings) as $key => $value) {
+            $config .= "php_admin_value[{$key}] = {$value}\n";
+        }
+
+        return $config;
     }
 
     /**
      * Create/update the user's pool, test the PHP-FPM config and reload. Rolls
      * back the pool file if the config test fails. Returns the final result;
      * a "disabled" result (dev mode) is treated as a successful no-op.
+     *
+     * @param  array<string, string>  $settings  Managed php.ini overrides.
      */
-    public function ensurePool(string $username, string $phpVersion): CommandResult
+    public function ensurePool(string $username, string $phpVersion, array $settings = []): CommandResult
     {
         $this->assertUsername($username);
         $this->assertPhpVersion($phpVersion);
 
-        $write = $this->fs->phpFpmPoolWrite($username, $phpVersion, $this->poolConfig($username, $phpVersion));
+        $write = $this->fs->phpFpmPoolWrite($username, $phpVersion, $this->poolConfig($username, $phpVersion, $settings));
         if (! $write->ok && ! $write->disabled) {
             return $write;
         }

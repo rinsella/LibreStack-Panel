@@ -145,6 +145,47 @@ return [
         'reverse_proxy' => 'Reverse proxy',
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Manageable per-site PHP settings (php.ini directives)
+    |--------------------------------------------------------------------------
+    | Each PHP/WordPress site runs in its own PHP-FPM pool, so these directives
+    | are injected as php_admin_value entries in that pool. This is the panel's
+    | equivalent of a "PHP settings manager": operators can raise the upload
+    | limit, memory, execution time, etc. without touching the global php.ini.
+    |
+    | 'type'  => 'size' (e.g. 64M / 1G) or 'int' (seconds / count).
+    | 'min' / 'max' bound the value (sizes in bytes); 'default' matches a stock
+    | php.ini. 'nginx_body' marks the directive that also drives nginx's
+    | client_max_body_size so large uploads are not rejected before reaching PHP.
+    */
+    'php_settings' => [
+        'upload_max_filesize' => [
+            'label' => 'Maximum upload file size', 'type' => 'size',
+            'default' => '2M', 'min' => 1048576, 'max' => 2147483648, 'nginx_body' => true,
+        ],
+        'post_max_size' => [
+            'label' => 'Maximum POST size', 'type' => 'size',
+            'default' => '8M', 'min' => 1048576, 'max' => 2147483648, 'nginx_body' => true,
+        ],
+        'memory_limit' => [
+            'label' => 'Memory limit', 'type' => 'size',
+            'default' => '256M', 'min' => 33554432, 'max' => 4294967296,
+        ],
+        'max_execution_time' => [
+            'label' => 'Max execution time (seconds)', 'type' => 'int',
+            'default' => '30', 'min' => 5, 'max' => 3600,
+        ],
+        'max_input_time' => [
+            'label' => 'Max input time (seconds)', 'type' => 'int',
+            'default' => '60', 'min' => 5, 'max' => 3600,
+        ],
+        'max_input_vars' => [
+            'label' => 'Max input variables', 'type' => 'int',
+            'default' => '1000', 'min' => 100, 'max' => 100000,
+        ],
+    ],
+
     'php_versions' => ['8.1', '8.2', '8.3', '8.4', '8.5'],
 
     /*

@@ -51,6 +51,9 @@
         <x-card title="Actions">
             <div class="space-y-2">
                 <a href="{{ route('websites.edit', $website) }}" class="ls-btn ls-btn-secondary w-full justify-center">Edit website</a>
+                @if (in_array($website->type, ['php', 'wordpress'], true))
+                    <a href="{{ route('php-settings.edit', $website) }}" class="ls-btn ls-btn-secondary w-full justify-center">@include('partials.icons', ['name' => 'adjustments', 'class' => 'h-4 w-4']) PHP settings</a>
+                @endif
                 <form method="POST" action="{{ route('websites.redeploy', $website) }}">
                     @csrf
                     <button class="ls-btn ls-btn-secondary w-full justify-center">@include('partials.icons', ['name' => 'refresh', 'class' => 'h-4 w-4']) Redeploy Nginx</button>

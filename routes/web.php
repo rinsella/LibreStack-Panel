@@ -11,6 +11,7 @@ use App\Http\Controllers\FileManagerController;
 use App\Http\Controllers\FirewallController;
 use App\Http\Controllers\JobController;
 use App\Http\Controllers\LogController;
+use App\Http\Controllers\PhpSettingController;
 use App\Http\Controllers\ReverseProxyController;
 use App\Http\Controllers\ServiceController;
 use App\Http\Controllers\SettingController;
@@ -73,6 +74,8 @@ Route::middleware('auth')->group(function () {
         Route::post('/websites/{website}/toggle', [WebsiteController::class, 'toggle'])->name('websites.toggle');
         Route::post('/websites/{website}/suspend', [WebsiteController::class, 'suspend'])->name('websites.suspend');
         Route::post('/websites/{website}/redeploy', [WebsiteController::class, 'redeploy'])->name('websites.redeploy');
+        Route::get('/websites/{website}/php', [PhpSettingController::class, 'edit'])->name('php-settings.edit');
+        Route::put('/websites/{website}/php', [PhpSettingController::class, 'update'])->name('php-settings.update');
     });
 
     // Reverse proxy -----------------------------------------------------------

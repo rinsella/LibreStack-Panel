@@ -146,7 +146,7 @@ class PhpFpmPoolTest extends TestCase
 
         // PhpFpmService that always fails ensurePool.
         $phpFpm = new class(app(PrivilegedFs::class)) extends PhpFpmService {
-            public function ensurePool(string $username, string $phpVersion): CommandResult
+            public function ensurePool(string $username, string $phpVersion, array $settings = []): CommandResult
             {
                 return new CommandResult(false, 1, '', 'php-fpm pool failed');
             }

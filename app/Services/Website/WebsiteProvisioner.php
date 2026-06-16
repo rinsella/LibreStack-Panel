@@ -68,7 +68,7 @@ class WebsiteProvisioner
                 $website->forceFill(['php_version' => $version])->save();
             }
 
-            $pool = $this->phpFpm->ensurePool($website->system_username, $version);
+            $pool = $this->phpFpm->ensurePool($website->system_username, $version, $website->phpSettings());
             if (! $pool->ok && ! $pool->disabled) {
                 return $pool;
             }

@@ -105,6 +105,7 @@ class NginxService
     {
         $root = $website->document_root;
         $socket = $this->fpmSocket($website);
+        $bodySize = \App\Services\System\PhpSettings::nginxBodySize($website->phpSettings());
 
         return $this->header($website)
             . "server {\n"
@@ -113,6 +114,7 @@ class NginxService
             . "    server_name {$this->serverNames($website)};\n\n"
             . "    root {$root};\n"
             . "    index index.php index.html;\n\n"
+            . "    client_max_body_size {$bodySize};\n\n"
             . $this->logBlock($website) . "\n"
             . "    location / {\n"
             . "        try_files \$uri \$uri/ /index.php?\$query_string;\n"
