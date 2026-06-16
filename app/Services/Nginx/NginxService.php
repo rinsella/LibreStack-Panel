@@ -63,22 +63,20 @@ class NginxService
     }
 
     /**
-     * Whether to emit an HTTPS server block for this site. The site must be
-     * flagged ssl_enabled AND have a certificate on disk. In dev (system
-     * commands disabled) there is no /etc/letsencrypt to read, so we trust the
-     * flag — that keeps generated previews/tests meaningful without a real cert.
+     * Whether to emit an HTTPS server block for this site.
+     *
+     * This is driven solely by the panel's own ssl_enabled flag (set when
+     * certbot issues a cert, cleared on delete). We deliberately do NOT stat
+     * /etc/letsencrypt/live here: that directory is root-only (0700), so the
+     * www-data queue worker — which runs the redeploy after a PHP-settings save
+     * — cannot read it and would wrongly drop the HTTPS block, silently breaking
+     * SSL on every settings change. nginx itself runs as root and reads the
+     * certificate at runtime, so trusting the DB flag is both correct and safe;
+     * if a cert were truly missing, `nginx -t` fails and deploy() rolls back.
      */
     protected function sslActive(Website $website): bool
     {
-        if (! $website->ssl_enabled) {
-            return false;
-        }
-
-        if (! $this->runner->isEnabled()) {
-            return true;
-        }
-
-        return is_file($this->sslCertPath($website->domain));
+        return (bool) $website->ssl_enabled;
     }
 
     protected function sslCertPath(string $domain): string

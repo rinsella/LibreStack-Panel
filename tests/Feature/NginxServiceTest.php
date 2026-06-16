@@ -188,4 +188,26 @@ class NginxServiceTest extends TestCase
         $this->assertStringContainsString('listen 443 ssl;', $config);
         $this->assertStringContainsString('client_max_body_size 800m;', $config);
     }
+
+    public function test_https_block_is_emitted_in_system_mode_without_reading_letsencrypt(): void
+    {
+        // Regression for the critical bug: the www-data queue worker runs the
+        // redeploy in system mode but CANNOT stat root-only /etc/letsencrypt.
+        // The HTTPS block must depend ONLY on the ssl_enabled flag, never on a
+        // filesystem check — otherwise SSL silently breaks on every settings
+        // change processed by the worker.
+        config(['librestack.system_enabled' => true]);
+
+        $website = $this->website('worker-test.com');
+        $website->ssl_enabled = true;
+        $website->force_https = true;
+
+        $config = app(NginxService::class)->generateConfig($website);
+
+        $this->assertStringContainsString('listen 443 ssl;', $config);
+        $this->assertStringContainsString(
+            'ssl_certificate /etc/letsencrypt/live/worker-test.com/fullchain.pem;',
+            $config
+        );
+    }
 }
