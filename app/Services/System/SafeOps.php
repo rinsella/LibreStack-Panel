@@ -538,8 +538,17 @@ class SafeOps
 
     protected function assertPhpVersion(string $version): void
     {
-        if (! preg_match('/^\d+\.\d+$/', $version)
-            || ! in_array($version, (array) config('librestack.php_versions'), true)) {
+        if (! preg_match('/^\d+\.\d+$/', $version)) {
+            throw new InvalidArgumentException("Invalid PHP version: {$version}");
+        }
+
+        // Accept a version in the configured allowlist OR one whose PHP-FPM is
+        // actually installed on this host, so a correctly-installed version is
+        // never rejected by a stale/incomplete config list.
+        $allowed = in_array($version, (array) config('librestack.php_versions'), true)
+            || is_dir("/etc/php/{$version}/fpm/pool.d");
+
+        if (! $allowed) {
             throw new InvalidArgumentException("Invalid PHP version: {$version}");
         }
     }

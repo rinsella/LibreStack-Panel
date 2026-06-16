@@ -71,6 +71,35 @@ class PhpFpmPoolTest extends TestCase
         app(PhpFpmService::class)->poolConfig('webuser', '9.9');
     }
 
+    public function test_version_not_in_config_is_accepted_when_fpm_is_installed(): void
+    {
+        // Simulate a host whose installed FPM (e.g. Ubuntu 26.04 → 8.5) is not
+        // in the configured php_versions list. The on-disk pool.d must make it
+        // valid so provisioning is never blocked by a stale config list.
+        config(['librestack.php_versions' => ['8.1', '8.2', '8.3', '8.4']]);
+
+        $fpmDir = '/etc/php/8.5/fpm/pool.d';
+        $created = false;
+        if (! is_dir($fpmDir)) {
+            $created = @mkdir($fpmDir, 0755, true);
+        }
+
+        if (! is_dir($fpmDir)) {
+            $this->markTestSkipped('Cannot create /etc/php/8.5/fpm/pool.d in this environment.');
+        }
+
+        try {
+            $pool = app(PhpFpmService::class)->poolConfig('webuser', '8.5');
+            $this->assertStringContainsString('[librestack-webuser]', $pool);
+        } finally {
+            if ($created) {
+                @rmdir($fpmDir);
+                @rmdir('/etc/php/8.5/fpm');
+                @rmdir('/etc/php/8.5');
+            }
+        }
+    }
+
     public function test_failed_php_fpm_test_fails_provisioning_and_rolls_back_pool(): void
     {
         config(['librestack.system_enabled' => true]);

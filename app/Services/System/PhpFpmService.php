@@ -156,8 +156,18 @@ CONF;
 
     protected function assertPhpVersion(string $version): void
     {
-        if (! preg_match('/^\d+\.\d+$/', $version)
-            || ! in_array($version, (array) config('librestack.php_versions'), true)) {
+        if (! preg_match('/^\d+\.\d+$/', $version)) {
+            throw new InvalidArgumentException("Invalid PHP version: {$version}");
+        }
+
+        // Accept a version if it's either in the configured allowlist OR has
+        // PHP-FPM actually installed on this host. The on-disk check prevents a
+        // correctly-installed version (e.g. 8.5 on Ubuntu 26.04) from being
+        // rejected because a stale/incomplete config list doesn't mention it.
+        $allowed = in_array($version, (array) config('librestack.php_versions'), true)
+            || is_dir("/etc/php/{$version}/fpm/pool.d");
+
+        if (! $allowed) {
             throw new InvalidArgumentException("Invalid PHP version: {$version}");
         }
     }

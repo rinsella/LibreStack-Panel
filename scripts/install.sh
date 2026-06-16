@@ -503,6 +503,10 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now librestack-queue.service
+# `enable --now` does NOT restart an already-running worker, so on a re-run the
+# old worker would keep serving STALE code/config in memory (a long-running
+# daemon loads everything once at boot). Force a restart so updates take effect.
+systemctl restart librestack-queue.service || true
 ok "Queue worker running."
 
 # --------------------------------------------------------------------------
