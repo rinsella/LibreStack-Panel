@@ -150,6 +150,7 @@ PACKAGES=(
     composer nodejs npm
     mariadb-server
     certbot python3-certbot-nginx
+    cron
     unzip curl git ufw sudo
 )
 
@@ -158,7 +159,7 @@ if ! apt-get install -y "${PACKAGES[@]}"; then
     warn "Versioned PHP packages unavailable; falling back to generic php-* metapackages."
     apt-get install -y nginx php-cli php-fpm php-sqlite3 php-mysql php-curl php-zip \
         php-mbstring php-xml php-bcmath php-common composer nodejs npm mariadb-server \
-        certbot python3-certbot-nginx unzip curl git ufw sudo
+        certbot python3-certbot-nginx cron unzip curl git ufw sudo
 fi
 
 # sudo is mandatory: the panel performs all privileged work through it.
@@ -338,8 +339,20 @@ ok "Core services enabled."
 # --------------------------------------------------------------------------
 log "Installing scheduler cron entry…"
 CRON_LINE="* * * * * cd ${APP_DIR} && /usr/bin/php artisan schedule:run >> ${LOG_DIR}/scheduler.log 2>&1"
-( crontab -l 2>/dev/null | grep -v 'artisan schedule:run' ; echo "${CRON_LINE}" ) | crontab -
-ok "Scheduler installed."
+if command -v crontab >/dev/null 2>&1; then
+    # Make sure the cron daemon is enabled so the schedule actually fires.
+    systemctl enable --now cron >/dev/null 2>&1 \
+        || systemctl enable --now cronie >/dev/null 2>&1 || true
+    if ( crontab -l 2>/dev/null | grep -v 'artisan schedule:run' ; echo "${CRON_LINE}" ) | crontab -; then
+        ok "Scheduler installed."
+    else
+        warn "Could not install the scheduler cron entry. Add it manually with 'crontab -e':"
+        warn "  ${CRON_LINE}"
+    fi
+else
+    warn "crontab not found; skipping scheduler. Install the 'cron' package, then add with 'crontab -e':"
+    warn "  ${CRON_LINE}"
+fi
 
 # --------------------------------------------------------------------------
 # Nginx site for the panel
