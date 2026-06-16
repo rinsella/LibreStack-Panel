@@ -1,9 +1,9 @@
 {
     "$schema": "https://getcomposer.org/schema.json",
-    "name": "laravel/laravel",
+    "name": "librestack/panel",
     "type": "project",
-    "description": "The skeleton application for the Laravel framework.",
-    "keywords": ["laravel", "framework"],
+    "description": "LibreStack Panel — a free, AGPL-3.0 self-hosted web hosting control panel.",
+    "keywords": ["librestack", "hosting", "control-panel", "laravel"],
     "license": "AGPL-3.0-or-later",
     "require": {
         "php": "^8.3",

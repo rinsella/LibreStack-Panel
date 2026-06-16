@@ -44,8 +44,65 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --------------------------------------------------------------------------
+# Add a documented PHP repository so the requested PHP version is available
+# on every supported distro (Ubuntu 22.04 ships PHP 8.1, Debian 12 ships 8.2).
+#   - Ubuntu: ppa:ondrej/php  (https://launchpad.net/~ondrej/+archive/ubuntu/php)
+#   - Debian: packages.sury.org/php  (https://deb.sury.org/)
+# --------------------------------------------------------------------------
+setup_php_repo() {
+    log "Configuring PHP ${PHP_VERSION_DEFAULT} package repository for ${ID}…"
+    apt-get install -y ca-certificates apt-transport-https lsb-release gnupg curl >/dev/null
+
+    case "${ID}" in
+        ubuntu)
+            apt-get install -y software-properties-common >/dev/null
+            if ! grep -rq "ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+                LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
+            fi
+            ;;
+        debian)
+            install -d -m 0755 /etc/apt/keyrings
+            curl -fsSL https://packages.sury.org/php/apt.gpg \
+                | gpg --dearmor -o /etc/apt/keyrings/sury-php.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/sury-php.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" \
+                > /etc/apt/sources.list.d/sury-php.list
+            ;;
+        *)
+            warn "Unknown distro '${ID}'; relying on the distro's default PHP packages."
+            ;;
+    esac
+    apt-get update -y
+}
+
+# --------------------------------------------------------------------------
+# Detect the PHP-FPM version actually installed (e.g. "8.3"). Falls back to the
+# running php-cli version, then to the requested default.
+# --------------------------------------------------------------------------
+detect_php_version() {
+    local v
+    v="$(ls /etc/php/ 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+    if [ -z "${v}" ] && command -v php >/dev/null 2>&1; then
+        v="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null)"
+    fi
+    echo "${v:-${PHP_VERSION_DEFAULT}}"
+}
+
+# Find an existing PHP-FPM unix socket, preferring the detected version.
+detect_php_socket() {
+    local v="$1"
+    local sock="/run/php/php${v}-fpm.sock"
+    if [ -S "${sock}" ]; then
+        echo "${sock}"
+        return
+    fi
+    ls /run/php/php*-fpm.sock 2>/dev/null | head -n1 || echo "${sock}"
+}
+
+# --------------------------------------------------------------------------
 # Install system packages
 # --------------------------------------------------------------------------
+setup_php_repo
+
 log "Updating apt and installing dependencies (this can take a few minutes)…"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
@@ -90,14 +147,23 @@ chown -R "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}" "${LOG_DIR}"
 # --------------------------------------------------------------------------
 # Environment + dependencies
 # --------------------------------------------------------------------------
+# Detect the PHP-FPM version that actually got installed and the real socket.
+PHP_VERSION="$(detect_php_version)"
+PHP_SOCK="$(detect_php_socket "${PHP_VERSION}")"
+ok "Using PHP ${PHP_VERSION} (FPM socket: ${PHP_SOCK})."
+
 if [ ! -f .env ]; then
     log "Creating .env from template…"
     cp .env.example .env
-    # Enable real system commands on the server.
-    sed -i 's/^LIBRESTACK_SYSTEM_ENABLED=.*/LIBRESTACK_SYSTEM_ENABLED=true/' .env
-    sed -i "s/^LIBRESTACK_DEFAULT_PHP=.*/LIBRESTACK_DEFAULT_PHP=${PHP_VERSION_DEFAULT}/" .env
-    sed -i "s#^APP_URL=.*#APP_URL=http://127.0.0.1:${PANEL_PORT}#" .env
 fi
+
+# Always (re)write the runtime-detected settings so generated configs are valid.
+sed -i 's/^LIBRESTACK_SYSTEM_ENABLED=.*/LIBRESTACK_SYSTEM_ENABLED=true/' .env
+sed -i 's/^LIBRESTACK_USE_SUDO=.*/LIBRESTACK_USE_SUDO=true/' .env
+grep -q '^LIBRESTACK_USE_SUDO=' .env || echo 'LIBRESTACK_USE_SUDO=true' >> .env
+sed -i "s/^LIBRESTACK_DEFAULT_PHP=.*/LIBRESTACK_DEFAULT_PHP=${PHP_VERSION}/" .env
+grep -q '^LIBRESTACK_DEFAULT_PHP=' .env || echo "LIBRESTACK_DEFAULT_PHP=${PHP_VERSION}" >> .env
+sed -i "s#^APP_URL=.*#APP_URL=http://127.0.0.1:${PANEL_PORT}#" .env
 
 log "Installing PHP dependencies…"
 composer install --no-dev --optimize-autoloader --no-interaction
@@ -120,6 +186,40 @@ php artisan route:cache || true
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/storage" "${APP_DIR}/bootstrap/cache" "${APP_DIR}/database"
 chmod -R ug+rw "${APP_DIR}/storage" "${APP_DIR}/bootstrap/cache"
 ok "Application prepared."
+
+# --------------------------------------------------------------------------
+# Privileged command allowlist (sudoers)
+# --------------------------------------------------------------------------
+# The panel and its queue worker run as ${SERVICE_USER} (never as root, and
+# PHP-FPM is NOT run as root). The few privileged binaries the panel needs are
+# granted through a tightly scoped, NOPASSWD sudoers allowlist. The CommandRunner
+# only ever executes these binaries with array arguments — never a shell string.
+log "Installing sudoers allowlist for ${SERVICE_USER}…"
+resolve_bin() { command -v "$1" 2>/dev/null || echo ""; }
+
+SUDO_BINS=()
+for b in systemctl nginx certbot ufw chown chmod find mysql mysqldump crontab journalctl; do
+    p="$(resolve_bin "$b")"
+    [ -n "${p}" ] && SUDO_BINS+=("${p}")
+done
+
+SUDOERS_FILE="/etc/sudoers.d/librestack"
+SUDOERS_TMP="$(mktemp)"
+{
+    echo "# Managed by LibreStack Panel. Do not edit manually."
+    echo "# Grants ${SERVICE_USER} NOPASSWD access to ONLY these exact binaries."
+    if [ "${#SUDO_BINS[@]}" -gt 0 ]; then
+        printf '%s ALL=(root) NOPASSWD: %s\n' "${SERVICE_USER}" "$(IFS=, ; echo "${SUDO_BINS[*]}")"
+    fi
+} > "${SUDOERS_TMP}"
+
+if visudo -cf "${SUDOERS_TMP}" >/dev/null 2>&1; then
+    install -m 0440 -o root -g root "${SUDOERS_TMP}" "${SUDOERS_FILE}"
+    ok "Sudoers allowlist installed at ${SUDOERS_FILE}."
+else
+    warn "Generated sudoers file failed validation; skipping (privileged actions will be unavailable)."
+fi
+rm -f "${SUDOERS_TMP}"
 
 # --------------------------------------------------------------------------
 # systemd queue worker
@@ -158,8 +258,8 @@ ok "Scheduler installed."
 # Nginx site for the panel
 # --------------------------------------------------------------------------
 log "Configuring Nginx for the panel on port ${PANEL_PORT}…"
-PHP_SOCK="/run/php/php${PHP_VERSION_DEFAULT}-fpm.sock"
-[ -S "${PHP_SOCK}" ] || PHP_SOCK="$(ls /run/php/php*-fpm.sock 2>/dev/null | head -n1 || echo "${PHP_SOCK}")"
+# PHP_SOCK was detected earlier from the actually-installed PHP-FPM.
+[ -S "${PHP_SOCK}" ] || PHP_SOCK="$(detect_php_socket "${PHP_VERSION}")"
 
 cat > /etc/nginx/sites-available/librestack-panel.conf <<EOF
 # Managed by LibreStack Panel. Do not edit manually.

@@ -21,6 +21,31 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Privilege escalation (sudoers allowlist)
+    |--------------------------------------------------------------------------
+    | The panel runs as an unprivileged user (www-data). Privileged binaries are
+    | executed through `sudo -n` using a tightly scoped /etc/sudoers.d/librestack
+    | allowlist installed by scripts/install.sh. Arbitrary shell is never used —
+    | the CommandRunner only runs allowlisted binaries with array arguments.
+    */
+    'use_sudo' => (bool) env('LIBRESTACK_USE_SUDO', false),
+
+    'privileged_binaries' => [
+        'systemctl',
+        'nginx',
+        'certbot',
+        'ufw',
+        'chown',
+        'chmod',
+        'find',
+        'mysql',
+        'mysqldump',
+        'crontab',
+        'journalctl',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Base paths
     |--------------------------------------------------------------------------
     */
@@ -32,6 +57,14 @@ return [
         'logs'            => env('LIBRESTACK_LOG_PATH', '/var/log/librestack'),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Default PHP version
+    |--------------------------------------------------------------------------
+    | The default PHP version used when generating PHP-FPM site configs. The
+    | installer detects the PHP-FPM version actually present on the host and
+    | writes it here; NginxService also falls back to any existing FPM socket.
+    */
     'default_php' => env('LIBRESTACK_DEFAULT_PHP', '8.3'),
 
     /*
@@ -44,6 +77,7 @@ return [
     */
     'allowed_binaries' => [
         'hostnamectl',
+        'hostname',
         'uname',
         'uptime',
         'free',
@@ -66,8 +100,10 @@ return [
         'mkdir',
         'chown',
         'chmod',
+        'find',
         'curl',
         'crontab',
+        'sudo',
     ],
 
     /*
@@ -82,6 +118,7 @@ return [
         'php8.1-fpm',
         'php8.2-fpm',
         'php8.3-fpm',
+        'php8.4-fpm',
         'redis-server',
         'ufw',
         'fail2ban',
@@ -100,7 +137,7 @@ return [
         'reverse_proxy' => 'Reverse proxy',
     ],
 
-    'php_versions' => ['8.1', '8.2', '8.3'],
+    'php_versions' => ['8.1', '8.2', '8.3', '8.4'],
 
     /*
     |--------------------------------------------------------------------------

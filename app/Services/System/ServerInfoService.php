@@ -29,7 +29,7 @@ class ServerInfoService
             'memory'      => $this->memory(),
             'disk'        => $this->disk(),
             'load'        => $this->loadAverage(),
-            'public_ip'   => $this->publicIp(),
+            'server_ip'   => $this->localIp(),
         ];
     }
 
@@ -169,16 +169,30 @@ class ServerInfoService
         ];
     }
 
-    public function publicIp(): ?string
+    /**
+     * Best-effort detection of the server's primary LOCAL IPv4 address.
+     *
+     * This is the locally-bound address, NOT necessarily the public/WAN IP — no
+     * outbound network calls are made, so behind NAT this returns the private
+     * address. It is labelled accordingly in the UI.
+     */
+    public function localIp(): ?string
     {
-        // Prefer locally bound address; avoid outbound calls by default.
-        $ip = trim((string) @file_get_contents('/proc/sys/kernel/hostname'));
+        $local = gethostbyname(gethostname() ?: '');
 
-        if (filter_var($ip, FILTER_VALIDATE_IP)) {
-            return $ip;
+        if (filter_var($local, FILTER_VALIDATE_IP) && $local !== '127.0.0.1') {
+            return $local;
         }
 
-        $local = gethostbyname(gethostname() ?: '');
+        // Fall back to enumerating interface addresses via the hostname tool.
+        $result = $this->runner->run('hostname', ['-I'], 5);
+        if (! $result->disabled && trim($result->output) !== '') {
+            foreach (preg_split('/\s+/', trim($result->output)) as $candidate) {
+                if (filter_var($candidate, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+                    return $candidate;
+                }
+            }
+        }
 
         return filter_var($local, FILTER_VALIDATE_IP) ? $local : null;
     }

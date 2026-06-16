@@ -3,18 +3,6 @@
 @section('subheading', 'One-click WordPress installs onto your PHP websites.')
 
 @section('content')
-@if (session('wp_db'))
-    @php $db = session('wp_db'); @endphp
-    <div class="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
-        <p class="font-semibold">WordPress database created — save these credentials now:</p>
-        <ul class="mt-2 space-y-1 font-mono text-xs">
-            <li>DB name: {{ $db['name'] ?? '' }}</li>
-            <li>DB user: {{ $db['user'] ?? '' }}</li>
-            <li>DB password: {{ $db['password'] ?? '' }}</li>
-        </ul>
-    </div>
-@endif
-
 <x-card padding="p-0">
     <div class="overflow-x-auto">
         <table class="ls-table">

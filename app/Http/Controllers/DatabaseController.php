@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\DatabaseUser;
 use App\Models\PanelDatabase;
 use App\Models\Website;
+use App\Jobs\ImportDatabaseJob;
 use App\Services\Database\DatabaseService;
 use App\Support\Audit;
 use App\Support\Validators;
@@ -21,8 +22,13 @@ class DatabaseController extends Controller
     public function index(Request $request)
     {
         $search = (string) $request->query('q', '');
+        $user = $request->user();
 
         $items = PanelDatabase::with('users', 'website')
+            ->when(! $user->isAdmin(), function ($q) use ($user) {
+                $q->where('user_id', $user->id)
+                    ->orWhereHas('website', fn ($w) => $w->where('user_id', $user->id));
+            })
             ->when($search !== '', fn ($q) => $q->where('name', 'like', "%{$search}%"))
             ->latest()
             ->paginate(15)
@@ -41,6 +47,8 @@ class DatabaseController extends Controller
 
     public function store(Request $request): RedirectResponse
     {
+        $this->authorize('create', PanelDatabase::class);
+
         $data = $request->validate([
             'name'        => ['required', 'string', 'max:63', 'unique:panel_databases,name'],
             'username'    => ['required', 'string', 'max:32'],
@@ -62,6 +70,7 @@ class DatabaseController extends Controller
         $database = PanelDatabase::create([
             'name'       => $data['name'],
             'website_id' => $data['website_id'] ?? null,
+            'user_id'    => $request->user()->id,
             'size_bytes' => $this->databases->size($data['name']),
         ]);
 
@@ -87,6 +96,8 @@ class DatabaseController extends Controller
 
     public function destroy(PanelDatabase $database): RedirectResponse
     {
+        $this->authorize('delete', $database);
+
         foreach ($database->users as $user) {
             $this->databases->dropUser($user->username, $user->host);
         }
@@ -103,6 +114,10 @@ class DatabaseController extends Controller
 
     public function destroyUser(DatabaseUser $user): RedirectResponse
     {
+        if ($user->panel_database_id) {
+            $this->authorize('update', PanelDatabase::findOrFail($user->panel_database_id));
+        }
+
         $this->databases->dropUser($user->username, $user->host);
         $username = $user->username;
         $user->delete();
@@ -114,6 +129,8 @@ class DatabaseController extends Controller
 
     public function export(PanelDatabase $database): BinaryFileResponse|RedirectResponse
     {
+        $this->authorize('view', $database);
+
         $dir = storage_path('app/db-exports');
         if (! is_dir($dir)) {
             @mkdir($dir, 0775, true);
@@ -136,18 +153,20 @@ class DatabaseController extends Controller
 
     public function import(Request $request, PanelDatabase $database): RedirectResponse
     {
+        $this->authorize('update', $database);
+
         $request->validate([
             'sql_file' => ['required', 'file', 'mimetypes:text/plain,application/sql,application/octet-stream', 'max:51200'],
         ]);
 
-        $path = $request->file('sql_file')->getRealPath();
-        $result = $this->databases->import($database->name, $path);
+        // Persist the upload so the queued job can read it after the request ends.
+        $stored = $request->file('sql_file')->store('db-imports');
+        $path = storage_path('app/' . $stored);
+
+        ImportDatabaseJob::dispatch($database->id, $path);
 
         Audit::log('database.imported', 'database', (string) $database->id, ['name' => $database->name]);
 
-        return back()->with(
-            $result->ok || $result->disabled ? 'success' : 'error',
-            $result->disabled ? 'Import requires system mode.' : ($result->ok ? 'Import complete.' : 'Import failed: ' . $result->combined())
-        );
+        return back()->with('success', "Database import queued for '{$database->name}'.");
     }
 }

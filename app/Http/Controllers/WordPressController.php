@@ -2,11 +2,10 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\PanelDatabase;
 use App\Models\Website;
+use App\Jobs\InstallWordPressJob;
 use App\Services\WordPress\WordPressService;
 use App\Support\Audit;
-use App\Support\JobRunner;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 
@@ -45,35 +44,12 @@ class WordPressController extends Controller
             return back()->with('error', 'Document root is not empty. Confirm overwrite to continue.');
         }
 
-        $result = null;
-        $job = JobRunner::run('wordpress.install', ['domain' => $website->domain], function ($job) use ($website, &$result) {
-            $result = $this->wordpress->install($website);
-            $job->log($result['message']);
-
-            if (! $result['ok']) {
-                throw new \RuntimeException($result['message']);
-            }
-
-            $website->update(['type' => 'wordpress']);
-
-            // Record the provisioned database for visibility.
-            if (! empty($result['db']['name'])) {
-                PanelDatabase::firstOrCreate(
-                    ['name' => $result['db']['name']],
-                    ['website_id' => $website->id, 'user_id' => $website->user_id]
-                );
-            }
-
-            return 'WordPress installed for ' . $website->domain;
-        });
+        InstallWordPressJob::dispatch($website->id);
 
         Audit::log('wordpress.installed', 'website', (string) $website->id, ['domain' => $website->domain]);
 
-        if ($job->status === 'success' && $result) {
-            return back()->with('success', $result['message'])
-                ->with('wp_db', $result['db']);
-        }
-
-        return back()->with('error', $job->message ?: 'WordPress installation failed.');
+        return back()->with('success',
+            "WordPress installation queued for {$website->domain}. "
+            . 'Database credentials are written to wp-config.php (mode 0640). Track progress on the Jobs page.');
     }
 }

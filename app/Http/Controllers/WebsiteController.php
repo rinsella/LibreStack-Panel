@@ -5,10 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use App\Models\Website;
 use App\Models\WebsiteAlias;
+use App\Jobs\ProvisionWebsiteJob;
 use App\Services\Nginx\NginxService;
 use App\Services\Website\WebsiteProvisioner;
 use App\Support\Audit;
-use App\Support\JobRunner;
 use App\Support\Validators;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -25,8 +25,10 @@ class WebsiteController extends Controller
     public function index(Request $request)
     {
         $search = (string) $request->query('q', '');
+        $user = $request->user();
 
         $websites = Website::with('owner')
+            ->when(! $user->isAdmin(), fn ($q) => $q->where('user_id', $user->id))
             ->when($search !== '', fn ($q) => $q->where('domain', 'like', "%{$search}%"))
             ->latest()
             ->paginate(15)
@@ -46,6 +48,8 @@ class WebsiteController extends Controller
 
     public function store(Request $request): RedirectResponse
     {
+        $this->authorize('create', Website::class);
+
         $data = $this->validateWebsite($request);
 
         if (! Validators::isValidDomain($data['domain'])) {
@@ -57,9 +61,12 @@ class WebsiteController extends Controller
 
         $documentRoot = $this->provisioner->documentRoot($data['system_username'], $data['domain']);
 
+        // Non-admins always own the websites they create.
+        $ownerId = $request->user()->isAdmin() ? ($data['user_id'] ?? null) : $request->user()->id;
+
         $website = Website::create([
             'domain'          => $data['domain'],
-            'user_id'         => $data['user_id'] ?? null,
+            'user_id'         => $ownerId,
             'type'            => $data['type'],
             'php_version'     => $data['php_version'] ?? config('librestack.default_php'),
             'document_root'   => $documentRoot,
@@ -73,29 +80,19 @@ class WebsiteController extends Controller
 
         $this->syncAliases($website, $request->input('aliases', ''));
 
-        $job = JobRunner::run('website.create', ['domain' => $website->domain], function ($job) use ($website) {
-            $result = $this->provisioner->provision($website);
-            $job->log($result->combined() ?: 'Provisioned');
-
-            if (! $result->ok && ! $result->disabled) {
-                throw new \RuntimeException('Nginx deploy failed: ' . $result->combined());
-            }
-
-            return "Website {$website->domain} provisioned.";
-        });
+        ProvisionWebsiteJob::dispatch($website->id);
 
         Audit::log('website.created', 'website', (string) $website->id, ['domain' => $website->domain]);
 
         return redirect()
             ->route('websites.show', $website)
-            ->with($job->status === 'success' ? 'success' : 'error',
-                $job->status === 'success'
-                    ? "Website {$website->domain} created."
-                    : "Website created but provisioning reported: {$job->message}");
+            ->with('success', "Website {$website->domain} created and queued for provisioning.");
     }
 
     public function show(Website $website)
     {
+        $this->authorize('view', $website);
+
         $website->load('owner', 'aliases', 'sslCertificate', 'backups');
 
         $configPreview = '';
@@ -110,6 +107,8 @@ class WebsiteController extends Controller
 
     public function edit(Website $website)
     {
+        $this->authorize('update', $website);
+
         return view('websites.edit', [
             'website'     => $website->load('aliases'),
             'owners'      => User::orderBy('name')->get(),
@@ -120,10 +119,12 @@ class WebsiteController extends Controller
 
     public function update(Request $request, Website $website): RedirectResponse
     {
+        $this->authorize('update', $website);
+
         $data = $this->validateWebsite($request, $website);
 
         $website->update([
-            'user_id'      => $data['user_id'] ?? null,
+            'user_id'      => $request->user()->isAdmin() ? ($data['user_id'] ?? null) : $website->user_id,
             'type'         => $data['type'],
             'php_version'  => $data['php_version'] ?? $website->php_version,
             'www_alias'    => $request->boolean('www_alias'),
@@ -142,6 +143,8 @@ class WebsiteController extends Controller
 
     public function destroy(Request $request, Website $website): RedirectResponse
     {
+        $this->authorize('delete', $website);
+
         $deleteFiles = $request->boolean('delete_files');
         $domain = $website->domain;
 
@@ -157,6 +160,8 @@ class WebsiteController extends Controller
 
     public function toggle(Website $website): RedirectResponse
     {
+        $this->authorize('update', $website);
+
         $website->update(['enabled' => ! $website->enabled]);
 
         $website->enabled
@@ -170,6 +175,8 @@ class WebsiteController extends Controller
 
     public function suspend(Website $website): RedirectResponse
     {
+        $this->authorize('update', $website);
+
         $suspended = ! $website->isSuspended();
         $website->update(['status' => $suspended ? 'suspended' : 'active']);
 
@@ -180,6 +187,8 @@ class WebsiteController extends Controller
 
     public function redeploy(Website $website): RedirectResponse
     {
+        $this->authorize('update', $website);
+
         $result = $this->nginx->deploy($website);
 
         Audit::log('website.redeployed', 'website', (string) $website->id);

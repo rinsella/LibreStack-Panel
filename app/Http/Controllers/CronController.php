@@ -15,10 +15,14 @@ class CronController extends Controller
     {
     }
 
-    public function index()
+    public function index(Request $request)
     {
+        $user = $request->user();
+
         return view('cron.index', [
-            'jobs' => CronJob::with('user')->latest()->get(),
+            'jobs' => CronJob::with('user')
+                ->when(! $user->isAdmin(), fn ($q) => $q->where('user_id', $user->id))
+                ->latest()->get(),
         ]);
     }
 
@@ -29,6 +33,8 @@ class CronController extends Controller
 
     public function store(Request $request): RedirectResponse
     {
+        $this->authorize('create', CronJob::class);
+
         $data = $this->validateCron($request);
 
         $job = CronJob::create($data + [
@@ -46,11 +52,15 @@ class CronController extends Controller
 
     public function edit(CronJob $cron)
     {
+        $this->authorize('update', $cron);
+
         return view('cron.edit', ['job' => $cron]);
     }
 
     public function update(Request $request, CronJob $cron): RedirectResponse
     {
+        $this->authorize('update', $cron);
+
         $data = $this->validateCron($request);
 
         $cron->update($data + ['enabled' => $request->boolean('enabled')]);
@@ -63,6 +73,8 @@ class CronController extends Controller
 
     public function toggle(CronJob $cron): RedirectResponse
     {
+        $this->authorize('update', $cron);
+
         $cron->update(['enabled' => ! $cron->enabled]);
         $this->cron->sync();
 
@@ -73,6 +85,8 @@ class CronController extends Controller
 
     public function destroy(CronJob $cron): RedirectResponse
     {
+        $this->authorize('delete', $cron);
+
         $cron->delete();
         $this->cron->sync();
 

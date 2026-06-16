@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Models\FileOperation;
 use App\Models\Website;
 use App\Services\FileManager\FileManagerService;
-use App\Support\Audit;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
@@ -23,8 +22,21 @@ class FileManagerController extends Controller
 
     public function index(Request $request)
     {
-        $websites = Website::orderBy('domain')->get();
-        $website = $this->currentWebsite($request, $websites);
+        $user = $request->user();
+        $websites = Website::query()
+            ->when(! $user->isAdmin(), fn ($q) => $q->where('user_id', $user->id))
+            ->orderBy('domain')->get();
+
+        // If a specific website is requested, authorize it explicitly so that
+        // attempting to browse another user's site is forbidden (not just empty).
+        if ($request->query('website')) {
+            $requested = Website::findOrFail((int) $request->query('website'));
+            $this->authorize('view', $requested);
+            $website = $requested;
+        } else {
+            $website = $websites->first();
+        }
+
         $relative = (string) $request->query('path', '');
 
         $items = [];
@@ -52,7 +64,7 @@ class FileManagerController extends Controller
 
     public function edit(Request $request)
     {
-        [$website, $base] = $this->resolveBase($request);
+        [$website, $base] = $this->resolveBase($request, 'view');
         $relative = (string) $request->query('file', '');
 
         $content = '';
@@ -84,7 +96,7 @@ class FileManagerController extends Controller
 
     public function download(Request $request): BinaryFileResponse|RedirectResponse
     {
-        [, $base] = $this->resolveBase($request);
+        [, $base] = $this->resolveBase($request, 'view');
         $relative = (string) $request->query('file', '');
 
         try {
@@ -227,9 +239,10 @@ class FileManagerController extends Controller
         return $this->backTo($website, $dir)->with('success', ucfirst($kind) . ' created.');
     }
 
-    protected function resolveBase(Request $request): array
+    protected function resolveBase(Request $request, string $ability = 'update'): array
     {
         $website = Website::findOrFail($request->input('website', $request->query('website')));
+        $this->authorize($ability, $website);
         $base = dirname($website->document_root);
 
         return [$website, $base];
@@ -241,6 +254,7 @@ class FileManagerController extends Controller
 
         return $id ? $websites->firstWhere('id', (int) $id) : $websites->first();
     }
+
 
     protected function backTo(Website $website, string $path): RedirectResponse
     {
@@ -256,7 +270,5 @@ class FileManagerController extends Controller
             'target_path' => $target ? substr($target, 0, 255) : null,
             'status'      => 'success',
         ]);
-
-        Audit::log('file.' . $operation, 'file', null, ['path' => $path]);
     }
 }

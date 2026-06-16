@@ -38,7 +38,7 @@
                 'Hostname' => $info['hostname'],
                 'OS' => $info['os'],
                 'Kernel' => $info['kernel'],
-                'Public IP' => $info['public_ip'] ?? 'n/a',
+                'Server IP' => $info['server_ip'] ?? 'n/a',
                 'Load avg' => $info['load']['1m'] . ' / ' . $info['load']['5m'] . ' / ' . $info['load']['15m'],
             ] as $label => $value)
                 <div class="flex items-center justify-between gap-4">

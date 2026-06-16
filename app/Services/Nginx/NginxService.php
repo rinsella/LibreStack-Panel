@@ -68,8 +68,7 @@ class NginxService
     }
 
     protected function header(Website $website): string
-    {
-        return "# Managed by LibreStack Panel. Do not edit manually.\n"
+    {        return "# Managed by LibreStack Panel. Do not edit manually.\n"
             . "# Website: {$website->domain} (type: {$website->type})\n";
     }
 
@@ -102,8 +101,7 @@ class NginxService
     protected function phpConfig(Website $website): string
     {
         $root = $website->document_root;
-        $php = $website->php_version ?: config('librestack.default_php');
-        $socket = "unix:/run/php/php{$php}-fpm.sock";
+        $socket = $this->fpmSocket($website);
 
         return $this->header($website)
             . "server {\n"
@@ -124,6 +122,28 @@ class NginxService
             . "        deny all;\n"
             . "    }\n"
             . "}\n";
+    }
+
+    /**
+     * Resolve the PHP-FPM socket for a website. Prefers the site's configured
+     * version, but if that socket is absent it falls back to any PHP-FPM socket
+     * present on the host so generated configs always point at a real socket.
+     */
+    protected function fpmSocket(Website $website): string
+    {
+        $php = $website->php_version ?: config('librestack.default_php');
+        $expected = "/run/php/php{$php}-fpm.sock";
+
+        if (@file_exists($expected)) {
+            return "unix:{$expected}";
+        }
+
+        $found = glob('/run/php/php*-fpm.sock') ?: [];
+        if ($found !== []) {
+            return 'unix:' . $found[0];
+        }
+
+        return "unix:{$expected}";
     }
 
     protected function proxyConfig(Website $website): string

@@ -187,11 +187,74 @@ class FileManagerService
         if ($zip->open($archive) !== true) {
             throw new RuntimeException('Cannot open zip archive.');
         }
+
         if (! is_dir($dest)) {
             mkdir($dest, 0755, true);
         }
-        $zip->extractTo($dest);
+
+        $realDest = realpath($dest);
+        if ($realDest === false) {
+            $zip->close();
+            throw new RuntimeException('Destination directory could not be resolved.');
+        }
+        // The destination must itself stay inside the website base directory.
+        $this->assertNotDenied($realDest);
+
+        // ZIP-slip defence: validate EVERY entry before extracting anything.
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $entry = $zip->getNameIndex($i);
+            if ($entry === false) {
+                $zip->close();
+                throw new RuntimeException('Unreadable zip entry.');
+            }
+            $this->assertSafeZipEntry($entry, $realDest);
+        }
+
+        if (! $zip->extractTo($realDest)) {
+            $zip->close();
+            throw new RuntimeException('Failed to extract archive.');
+        }
         $zip->close();
+    }
+
+    /**
+     * Reject dangerous zip entries (path traversal, absolute paths, drive paths,
+     * null bytes) and ensure the resolved destination stays inside $realDest.
+     */
+    protected function assertSafeZipEntry(string $entry, string $realDest): void
+    {
+        if ($entry === '' || str_contains($entry, "\0")) {
+            throw new RuntimeException('Zip entry contains a null byte or is empty.');
+        }
+
+        // Normalise Windows separators for inspection.
+        $normalized = str_replace('\\', '/', $entry);
+
+        // Absolute POSIX path or Windows drive path (e.g. C:\ or C:/).
+        if (str_starts_with($normalized, '/') || preg_match('#^[A-Za-z]:#', $normalized)) {
+            throw new RuntimeException("Zip entry uses an absolute path: {$entry}");
+        }
+
+        // Any traversal segment.
+        foreach (explode('/', $normalized) as $segment) {
+            if ($segment === '..') {
+                throw new RuntimeException("Zip entry contains a traversal segment: {$entry}");
+            }
+        }
+
+        // Final containment check on the resolved target path.
+        $target = $realDest . '/' . ltrim($normalized, '/');
+        $targetReal = realpath(dirname($target));
+        // dirname may not exist yet for nested entries; walk up to an existing parent.
+        $check = $target;
+        while ($targetReal === false && $check !== '' && $check !== '/' && $check !== '.') {
+            $check = dirname($check);
+            $targetReal = realpath($check);
+        }
+
+        if ($targetReal === false || ! ($targetReal === $realDest || str_starts_with($targetReal . '/', $realDest . '/'))) {
+            throw new RuntimeException("Zip entry escapes the destination: {$entry}");
+        }
     }
 
     protected function recursiveDelete(string $path): void

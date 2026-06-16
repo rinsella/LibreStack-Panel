@@ -29,7 +29,7 @@ class CommandRunner
             return CommandResult::disabled();
         }
 
-        $command = array_merge([$binary], array_values($args));
+        $command = $this->buildCommand($binary, array_values($args));
 
         $pending = Process::timeout($timeout ?? 60);
 
@@ -58,6 +58,27 @@ class CommandRunner
     public function isEnabled(): bool
     {
         return (bool) config('librestack.system_enabled');
+    }
+
+    /**
+     * Build the final command array, prepending `sudo -n` for binaries that
+     * require root. Privilege is granted by a tightly scoped sudoers allowlist
+     * (/etc/sudoers.d/librestack) \u2014 never by running PHP-FPM as root and never
+     * via a shell.
+     *
+     * @param  array<int, string|int>  $args
+     * @return array<int, string|int>
+     */
+    protected function buildCommand(string $binary, array $args): array
+    {
+        $name = basename($binary);
+        $needsRoot = in_array($name, (array) config('librestack.privileged_binaries'), true);
+
+        if ($needsRoot && config('librestack.use_sudo')) {
+            return array_merge(['sudo', '-n', $binary], $args);
+        }
+
+        return array_merge([$binary], $args);
     }
 
     protected function assertAllowed(string $binary): void

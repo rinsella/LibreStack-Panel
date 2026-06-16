@@ -8,6 +8,7 @@ use App\Services\Support\CommandRunner;
 use App\Support\Validators;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
+use RuntimeException;
 
 /**
  * Manages MariaDB/MySQL databases and users.
@@ -91,9 +92,15 @@ class DatabaseService
             return CommandResult::disabled();
         }
 
-        $args = array_merge($this->authArgs(), [$name, '--result-file=' . $destination]);
+        $defaults = $this->makeDefaultsFile();
 
-        return $this->runner->run('mysqldump', $args, 300);
+        try {
+            $args = ['--defaults-extra-file=' . $defaults, $name, '--result-file=' . $destination];
+
+            return $this->runner->run('mysqldump', $args, 300);
+        } finally {
+            @unlink($defaults);
+        }
     }
 
     public function import(string $name, string $sqlFilePath): CommandResult
@@ -104,38 +111,83 @@ class DatabaseService
             throw new InvalidArgumentException('SQL file is not readable.');
         }
 
-        $sql = (string) file_get_contents($sqlFilePath);
-        $args = array_merge($this->authArgs(), [$name]);
+        if (! $this->runner->isEnabled()) {
+            return CommandResult::disabled();
+        }
 
-        return $this->runner->runWithInput('mysql', $args, $sql, 300);
+        $sql = (string) file_get_contents($sqlFilePath);
+
+        return $this->runMysql([$name], $sql, 300);
     }
 
     protected function execSql(string $sql, array $extraArgs = []): CommandResult
     {
-        $args = array_merge($this->authArgs(), $extraArgs, ['-e', $sql]);
-
-        return $this->runner->run('mysql', $args, 60);
+        // SQL is always piped through stdin, never via `-e` on the command line,
+        // so statements containing generated passwords cannot appear in the
+        // process list.
+        return $this->runMysql($extraArgs, $sql, 60);
     }
 
     /**
-     * Build authentication arguments from stored admin credentials.
+     * Run the mysql client with admin credentials supplied through a 0600
+     * defaults-extra-file (never as `-p<password>` on the command line). SQL is
+     * piped over stdin. The credentials file is always removed afterwards.
      *
-     * @return array<int, string>
+     * @param  array<int, string>  $extraArgs
      */
-    protected function authArgs(): array
+    protected function runMysql(array $extraArgs, ?string $sql, int $timeout): CommandResult
     {
-        $user = Setting::get('db_admin_username', 'root');
-        $pass = Setting::get('db_admin_password');
-
-        $args = ['-u', (string) $user];
-
-        if ($pass) {
-            // mysql accepts -p<password> with no space; passed as a single arg
-            // so it is never split by a shell.
-            $args[] = '-p' . $pass;
+        if (! $this->runner->isEnabled()) {
+            return CommandResult::disabled();
         }
 
-        return $args;
+        $defaults = $this->makeDefaultsFile();
+
+        try {
+            $args = array_merge(['--defaults-extra-file=' . $defaults], $extraArgs);
+
+            return $sql !== null
+                ? $this->runner->runWithInput('mysql', $args, $sql, $timeout)
+                : $this->runner->run('mysql', $args, $timeout);
+        } finally {
+            @unlink($defaults);
+        }
+    }
+
+    /**
+     * Write the admin credentials to a temporary 0600 my.cnf-style file so the
+     * password is never exposed in the process list or in logs.
+     */
+    protected function makeDefaultsFile(): string
+    {
+        $user = (string) (Setting::get('db_admin_username', 'root') ?: 'root');
+        $pass = (string) (Setting::get('db_admin_password') ?? '');
+
+        $file = tempnam(sys_get_temp_dir(), 'lsdb_');
+        if ($file === false) {
+            throw new RuntimeException('Unable to create a temporary credentials file.');
+        }
+
+        // Restrict to owner read/write BEFORE writing the secret.
+        @chmod($file, 0600);
+
+        $contents = "[client]\nuser=\"" . $this->escapeMyCnf($user) . "\"\n";
+        if ($pass !== '') {
+            $contents .= 'password="' . $this->escapeMyCnf($pass) . "\"\n";
+        }
+
+        file_put_contents($file, $contents);
+        @chmod($file, 0600);
+
+        return $file;
+    }
+
+    /**
+     * Escape a value for a double-quoted my.cnf option.
+     */
+    protected function escapeMyCnf(string $value): string
+    {
+        return str_replace(['\\', '"'], ['\\\\', '\\"'], $value);
     }
 
     protected function assertDbName(string $name): void

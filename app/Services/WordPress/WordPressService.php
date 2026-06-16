@@ -4,7 +4,6 @@ namespace App\Services\WordPress;
 
 use App\Models\Website;
 use App\Services\Database\DatabaseService;
-use App\Services\Support\CommandResult;
 use App\Services\Support\CommandRunner;
 use Illuminate\Support\Str;
 
@@ -28,7 +27,7 @@ class WordPressService
     {
         $docroot = $website->document_root;
 
-        // Provision database + user
+        // Provision database + user (tracked so we can roll back on failure).
         $dbName = 'wp_' . substr(md5($website->domain), 0, 8);
         $dbUser = 'wp_' . substr(md5($website->domain . 'user'), 0, 8);
         $dbPass = $this->databases->generatePassword();
@@ -37,6 +36,8 @@ class WordPressService
         $this->databases->createUser($dbUser, $dbPass);
         $this->databases->grant($dbUser, $dbName);
 
+        $db = ['name' => $dbName, 'user' => $dbUser, 'password' => $dbPass];
+
         if (! $this->runner->isEnabled()) {
             // Dev mode: just lay down a wp-config so the workflow is verifiable.
             $this->writeConfig($docroot, $dbName, $dbUser, $dbPass);
@@ -44,7 +45,7 @@ class WordPressService
             return [
                 'ok' => true,
                 'message' => '[dev] WordPress scaffolded (download skipped).',
-                'db' => ['name' => $dbName, 'user' => $dbUser, 'password' => $dbPass],
+                'db' => $db,
             ];
         }
 
@@ -54,20 +55,30 @@ class WordPressService
             '-fsSL', '-o', $tmp, 'https://wordpress.org/latest.tar.gz',
         ], 300);
 
-        if (! $download->ok) {
-            return ['ok' => false, 'message' => 'Failed to download WordPress.', 'db' => []];
+        // Verify the download actually produced a non-empty archive.
+        if (! $download->ok || ! is_file($tmp) || filesize($tmp) < 1024) {
+            @unlink($tmp);
+
+            return $this->rollback($db, 'Failed to download WordPress.');
         }
 
-        // Extract (wordpress.tar.gz contains a top-level "wordpress/" folder).
         $this->runner->run('mkdir', ['-p', $docroot], 20);
+
+        // Remove the panel's placeholder index.html so it cannot shadow index.php.
+        $placeholder = rtrim($docroot, '/') . '/index.html';
+        if (is_file($placeholder)) {
+            @unlink($placeholder);
+        }
+
         $extract = $this->runner->run('tar', [
             '-xzf', $tmp, '-C', $docroot, '--strip-components=1',
         ], 120);
 
         @unlink($tmp);
 
-        if (! $extract->ok) {
-            return ['ok' => false, 'message' => 'Failed to extract WordPress.', 'db' => []];
+        // Verify extraction produced a real WordPress tree.
+        if (! $extract->ok || ! is_file(rtrim($docroot, '/') . '/wp-settings.php')) {
+            return $this->rollback($db, 'Failed to extract WordPress.');
         }
 
         $this->writeConfig($docroot, $dbName, $dbUser, $dbPass);
@@ -76,8 +87,27 @@ class WordPressService
         return [
             'ok' => true,
             'message' => 'WordPress installed. Open the site to finish setup.',
-            'db' => ['name' => $dbName, 'user' => $dbUser, 'password' => $dbPass],
+            'db' => $db,
         ];
+    }
+
+    /**
+     * Drop the provisioned database and user so a failed install leaves nothing
+     * behind. The password is never included in the returned message.
+     *
+     * @param  array<string,string>  $db
+     * @return array{ok: bool, message: string, db: array<string,string>}
+     */
+    protected function rollback(array $db, string $message): array
+    {
+        if (! empty($db['user'])) {
+            $this->databases->dropUser($db['user']);
+        }
+        if (! empty($db['name'])) {
+            $this->databases->dropDatabase($db['name']);
+        }
+
+        return ['ok' => false, 'message' => $message, 'db' => []];
     }
 
     public function detectVersion(Website $website): ?string
@@ -128,13 +158,23 @@ if (!defined('ABSPATH')) {
 require_once ABSPATH . 'wp-settings.php';
 PHP;
 
-        @file_put_contents(rtrim($docroot, '/') . '/wp-config.php', $config);
+        $wpConfig = rtrim($docroot, '/') . '/wp-config.php';
+        @file_put_contents($wpConfig, $config);
+        // wp-config.php holds the database password; keep it private (0640).
+        @chmod($wpConfig, 0640);
     }
 
-    protected function setPermissions(Website $website, string $docroot): CommandResult
+    /**
+     * Apply least-privilege permissions: directories 0755, files 0644, and the
+     * secret-bearing wp-config.php 0640. Nothing is chmod'd 0755 blindly.
+     */
+    protected function setPermissions(Website $website, string $docroot): void
     {
-        $this->runner->run('chown', ['-R', "{$website->system_username}:{$website->system_username}", $docroot], 60);
+        $owner = $website->system_username;
 
-        return $this->runner->run('chmod', ['-R', '755', $docroot], 60);
+        $this->runner->run('chown', ['-R', "{$owner}:{$owner}", $docroot], 120);
+        $this->runner->run('find', [$docroot, '-type', 'd', '-exec', 'chmod', '755', '{}', '+'], 120);
+        $this->runner->run('find', [$docroot, '-type', 'f', '-exec', 'chmod', '644', '{}', '+'], 120);
+        $this->runner->run('chmod', ['640', rtrim($docroot, '/') . '/wp-config.php'], 30);
     }
 }

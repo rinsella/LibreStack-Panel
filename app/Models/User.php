@@ -56,6 +56,23 @@ class User extends Authenticatable
     }
 
     /**
+     * Administrators (super_admin or admin) may manage every resource in the
+     * panel, regardless of ownership.
+     */
+    public function isAdmin(): bool
+    {
+        return $this->hasRole('super_admin') || $this->hasRole('admin');
+    }
+
+    /**
+     * Auditors have read-only access and may never mutate resources.
+     */
+    public function isAuditor(): bool
+    {
+        return $this->hasRole('auditor') && ! $this->isAdmin();
+    }
+
+    /**
      * Check whether the user has a given permission through any of their roles.
      */
     public function hasPermission(string $permission): bool
