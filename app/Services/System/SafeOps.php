@@ -120,7 +120,18 @@ class SafeOps
             }
         }
 
-        $this->chownRecursive("/home/{$username}/web/{$domain}", $username, $username);
+        $this->chownRecursive($base, $username, $username);
+
+        // `useradd --create-home` makes the home directory mode 0750, which
+        // blocks www-data (nginx + the panel process) from traversing into the
+        // document root — causing static files to 403 and the file manager to
+        // report the site "does not exist". Make the home traversable by other
+        // (0751: traverse only, never a directory listing) so the panel works.
+        $webRoot = rtrim((string) config('librestack.paths.web_root'), '/');
+        $home = "{$webRoot}/{$username}";
+        if (is_dir($home)) {
+            @chmod($home, 0751);
+        }
     }
 
     public function writeSiteIndex(string $username, string $domain, string $documentRoot, string $content): void

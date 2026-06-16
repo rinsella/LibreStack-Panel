@@ -197,6 +197,37 @@ class ServerInfoService
         return filter_var($local, FILTER_VALIDATE_IP) ? $local : null;
     }
 
+    /**
+     * PHP versions actually installed with PHP-FPM on this host (e.g. ["8.3"]).
+     *
+     * Per-site pools are written to /etc/php/{version}/fpm/pool.d, so a version
+     * without that directory cannot run a site and must never be offered in the
+     * UI. Falls back to the full configured list when nothing is detected (dev
+     * boxes / non-system mode) so the panel keeps working without a real PHP-FPM.
+     *
+     * @return array<int, string>
+     */
+    public function installedPhpVersions(): array
+    {
+        $configured = array_values(array_filter(
+            (array) config('librestack.php_versions'),
+            fn ($v) => is_string($v) && preg_match('/^\d+\.\d+$/', $v),
+        ));
+
+        $found = [];
+        foreach (glob('/etc/php/*/fpm/pool.d', GLOB_ONLYDIR) ?: [] as $dir) {
+            $version = basename(dirname(dirname($dir)));
+            if (preg_match('/^\d+\.\d+$/', $version)) {
+                $found[] = $version;
+            }
+        }
+
+        // Keep the configured ordering; only expose versions we can actually run.
+        $installed = array_values(array_intersect($configured, $found));
+
+        return $installed ?: $configured;
+    }
+
     protected function humanizeSeconds(int $seconds): string
     {
         $days = intdiv($seconds, 86400);

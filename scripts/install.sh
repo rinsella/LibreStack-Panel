@@ -134,6 +134,70 @@ detect_php_socket() {
 }
 
 # --------------------------------------------------------------------------
+# Detect the server's PUBLIC IP address.
+#
+# `hostname -I` returns the PRIMARY interface address, which on cloud VPSes
+# (AWS/GCP/Azure) is a PRIVATE NAT address (10.x / 172.16-31.x / 192.168.x) —
+# NOT the address users reach the panel on. We query the cloud metadata services
+# first, then fall back to a public echo service, and finally to the local
+# interface so the installer always advertises a usable address.
+# --------------------------------------------------------------------------
+is_public_ip() {
+    local ip="$1"
+    [[ "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    case "${ip}" in
+        10.*|127.*|169.254.*|192.168.*|0.*|255.*) return 1 ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[0-1].*)   return 1 ;;
+        100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 1 ;;
+    esac
+    return 0
+}
+
+detect_public_ip() {
+    local ip token url
+
+    # AWS IMDSv2 (token-protected) then IMDSv1.
+    token="$(curl -fsS --max-time 3 -X PUT 'http://169.254.169.254/latest/api/token' \
+        -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)"
+    if [ -n "${token}" ]; then
+        ip="$(curl -fsS --max-time 3 -H "X-aws-ec2-metadata-token: ${token}" \
+            'http://169.254.169.254/latest/meta-data/public-ipv4' 2>/dev/null || true)"
+        is_public_ip "${ip}" && { echo "${ip}"; return 0; }
+    fi
+    ip="$(curl -fsS --max-time 3 'http://169.254.169.254/latest/meta-data/public-ipv4' 2>/dev/null || true)"
+    is_public_ip "${ip}" && { echo "${ip}"; return 0; }
+
+    # Google Cloud.
+    ip="$(curl -fsS --max-time 3 -H 'Metadata-Flavor: Google' \
+        'http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip' 2>/dev/null || true)"
+    is_public_ip "${ip}" && { echo "${ip}"; return 0; }
+
+    # Azure IMDS.
+    ip="$(curl -fsS --max-time 3 -H 'Metadata: true' \
+        'http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text' 2>/dev/null || true)"
+    is_public_ip "${ip}" && { echo "${ip}"; return 0; }
+
+    # Generic public echo services (only if the box has outbound internet).
+    for url in 'https://api.ipify.org' 'https://ifconfig.me/ip' 'https://icanhazip.com'; do
+        ip="$(curl -fsS --max-time 5 "${url}" 2>/dev/null | tr -d '[:space:]' || true)"
+        is_public_ip "${ip}" && { echo "${ip}"; return 0; }
+    done
+
+    return 1
+}
+
+# Advertise the public IP when one is found, otherwise the primary local address.
+detect_server_ip() {
+    local public
+    public="$(detect_public_ip || true)"
+    if [ -n "${public}" ]; then
+        echo "${public}"
+        return 0
+    fi
+    hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+# --------------------------------------------------------------------------
 # Install system packages
 # --------------------------------------------------------------------------
 setup_php_repo
@@ -209,9 +273,16 @@ PHP_SOCK="$(detect_php_socket "${PHP_VERSION}")"
 [ -S "${PHP_SOCK}" ] || warn "PHP-FPM socket ${PHP_SOCK} not found yet; it should appear once php-fpm is running."
 ok "Using PHP ${PHP_VERSION} (FPM socket: ${PHP_SOCK})."
 
-# Best-effort detection of the server's primary IP for APP_URL.
-SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+# Detect the server's PUBLIC IP for APP_URL (falls back to the local address).
+log "Detecting the server's public IP address…"
+LOCAL_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+SERVER_IP="$(detect_server_ip)"
 APP_URL_HOST="${SERVER_IP:-127.0.0.1}"
+if [ -n "${SERVER_IP}" ] && [ "${SERVER_IP}" != "${LOCAL_IP}" ]; then
+    ok "Public IP: ${SERVER_IP} (local interface: ${LOCAL_IP:-n/a})."
+else
+    warn "Could not determine a public IP; using ${APP_URL_HOST}. If this is a private address, set APP_URL manually in .env."
+fi
 
 if [ ! -f .env ]; then
     log "Creating .env from template…"
@@ -393,6 +464,10 @@ EOF
 
 ln -sf /etc/nginx/sites-available/librestack-panel.conf /etc/nginx/sites-enabled/librestack-panel.conf
 
+# Remove the distro's default catch-all site so it does not shadow managed
+# domains with the "Welcome to nginx" page on port 80.
+rm -f /etc/nginx/sites-enabled/default
+
 if nginx -t; then
     systemctl reload nginx
     ok "Nginx configured and reloaded."
@@ -420,7 +495,7 @@ sudo -u "${SERVICE_USER}" php "${APP_DIR}/artisan" librestack:doctor --install |
 # --------------------------------------------------------------------------
 # Done
 # --------------------------------------------------------------------------
-SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+SERVER_IP="${SERVER_IP:-$(detect_server_ip)}"
 echo
 echo -e "${C_GREEN}========================================================${C_RESET}"
 echo -e "${C_GREEN} LibreStack Panel installed successfully${C_RESET}"

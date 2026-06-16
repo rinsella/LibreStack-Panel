@@ -7,6 +7,7 @@ use App\Models\Website;
 use App\Models\WebsiteAlias;
 use App\Jobs\ProvisionWebsiteJob;
 use App\Services\Nginx\NginxService;
+use App\Services\System\ServerInfoService;
 use App\Services\Website\WebsiteProvisioner;
 use App\Support\Audit;
 use App\Support\Validators;
@@ -19,6 +20,7 @@ class WebsiteController extends Controller
     public function __construct(
         protected WebsiteProvisioner $provisioner,
         protected NginxService $nginx,
+        protected ServerInfoService $server,
     ) {
     }
 
@@ -42,7 +44,7 @@ class WebsiteController extends Controller
         return view('websites.create', [
             'owners'    => $request->user()->isAdmin() ? User::orderBy('name')->get() : collect(),
             'siteTypes' => config('librestack.site_types'),
-            'phpVersions' => config('librestack.php_versions'),
+            'phpVersions' => $this->server->installedPhpVersions(),
         ]);
     }
 
@@ -206,7 +208,7 @@ class WebsiteController extends Controller
                                   Rule::unique('websites', 'domain')->ignore($website?->id)],
             'user_id'         => ['nullable', 'exists:users,id'],
             'type'            => ['required', Rule::in(array_keys((array) config('librestack.site_types')))],
-            'php_version'     => ['nullable', Rule::in((array) config('librestack.php_versions'))],
+            'php_version'     => ['nullable', Rule::in($this->server->installedPhpVersions())],
             'system_username' => [$website ? 'nullable' : 'required', 'string', 'max:32'],
             'upstream_url'    => ['nullable', 'url', 'max:255'],
             'aliases'         => ['nullable', 'string'],
