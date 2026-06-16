@@ -126,6 +126,7 @@ return [
         'php8.2-fpm',
         'php8.3-fpm',
         'php8.4-fpm',
+        'php8.5-fpm',
         'redis-server',
         'ufw',
         'fail2ban',
@@ -144,7 +145,7 @@ return [
         'reverse_proxy' => 'Reverse proxy',
     ],
 
-    'php_versions' => ['8.1', '8.2', '8.3', '8.4'],
+    'php_versions' => ['8.1', '8.2', '8.3', '8.4', '8.5'],
 
     /*
     |--------------------------------------------------------------------------

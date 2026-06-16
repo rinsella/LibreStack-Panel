@@ -133,7 +133,7 @@ detect_php_version() {
 # installed, so /etc/php/<v>/fpm/pool.d exists and per-user pools can be written.
 # This repairs boxes where only the php-cli was pulled in (e.g. as a composer
 # dependency). Errors are shown, not swallowed, so a genuine failure is visible.
-# Returns success only if the pool.d directory exists afterwards.
+# Returns success only if some FPM pool.d directory exists afterwards.
 ensure_php_fpm_installed() {
     local v="$1"
     [ -d "/etc/php/${v}/fpm/pool.d" ] && return 0
@@ -146,25 +146,43 @@ ensure_php_fpm_installed() {
     fi
     apt-get update -y || warn "apt-get update reported errors; continuing best-effort."
 
-    # Try the versioned FPM + extensions first, then just the FPM package, then
-    # the generic php-fpm metapackage. Show apt's output so failures are visible.
+    # 1. Try the requested version's FPM + extensions.
     apt-get install -y \
         "php${v}-fpm" "php${v}-cli" "php${v}-sqlite3" "php${v}-mysql" "php${v}-curl" \
         "php${v}-zip" "php${v}-mbstring" "php${v}-xml" "php${v}-bcmath" "php${v}-common" \
-        || apt-get install -y "php${v}-fpm" \
-        || apt-get install -y php-fpm \
-        || true
+        || apt-get install -y "php${v}-fpm" || true
+    [ -d "/etc/php/${v}/fpm/pool.d" ] && return 0
 
-    if [ ! -d "/etc/php/${v}/fpm/pool.d" ]; then
-        warn "Could not install php${v}-fpm. apt knows the package as:"
-        apt-cache policy "php${v}-fpm" 2>/dev/null | sed 's/^/    /' || true
-        # A different FPM version may have landed (e.g. generic php-fpm pulled a
-        # newer one); report whatever pool.d now exists so the caller can adapt.
-        ls -d /etc/php/*/fpm/pool.d 2>/dev/null | sed 's/^/    available: /' || true
+    # 2. Try the generic php-fpm metapackage (tracks the distro default version).
+    log "php${v}-fpm unavailable; trying the generic php-fpm metapackage…"
+    apt-get install -y php-fpm php-cli php-sqlite3 php-mysql php-curl \
+        php-zip php-mbstring php-xml php-bcmath php-common || true
+    [ -n "$(ls -d /etc/php/*/fpm/pool.d 2>/dev/null)" ] && return 0
+
+    # 3. Last resort: discover ANY phpX.Y-fpm package the archive actually
+    #    publishes (a brand-new distro may ship e.g. php8.5-fpm) and install it
+    #    plus the matching extensions.
+    local cand cv
+    cand="$(apt-cache search --names-only '^php[0-9]+\.[0-9]+-fpm$' 2>/dev/null \
+            | awk '{print $1}' | sort -V | tail -n1)"
+    if [ -n "${cand}" ]; then
+        cv="${cand#php}"; cv="${cv%-fpm}"
+        log "Installing the PHP-FPM version available in this archive: ${cand} (PHP ${cv})…"
+        apt-get install -y \
+            "php${cv}-fpm" "php${cv}-cli" "php${cv}-sqlite3" "php${cv}-mysql" "php${cv}-curl" \
+            "php${cv}-zip" "php${cv}-mbstring" "php${cv}-xml" "php${cv}-bcmath" "php${cv}-common" \
+            || apt-get install -y "${cand}" || true
     fi
 
-    # Success if the requested version's pool dir exists OR any FPM pool dir does.
-    [ -d "/etc/php/${v}/fpm/pool.d" ] || [ -n "$(ls -d /etc/php/*/fpm/pool.d 2>/dev/null)" ]
+    if [ -z "$(ls -d /etc/php/*/fpm/pool.d 2>/dev/null)" ]; then
+        warn "No PHP-FPM package could be installed. Diagnostics:"
+        echo "    apt-cache policy php${v}-fpm:"; apt-cache policy "php${v}-fpm" 2>/dev/null | sed 's/^/      /' || true
+        echo "    php*-fpm packages available in this archive:"
+        apt-cache search --names-only '^php[0-9.]*-fpm$' 2>/dev/null | sed 's/^/      /' || true
+    fi
+
+    # Success if any FPM pool dir now exists.
+    [ -n "$(ls -d /etc/php/*/fpm/pool.d 2>/dev/null)" ]
 }
 
 # Find an existing PHP-FPM unix socket, preferring the detected version.
@@ -311,8 +329,23 @@ fi
 # requires /etc/php/<v>/fpm/pool.d to exist. Make sure PHP-FPM for the chosen
 # version is installed (repairs boxes that only got the php-cli), then re-detect.
 if ! ensure_php_fpm_installed "${PHP_VERSION}"; then
-    die "PHP-FPM ${PHP_VERSION} could not be installed (missing /etc/php/${PHP_VERSION}/fpm/pool.d). Install php${PHP_VERSION}-fpm and re-run this installer."
+    die "PHP-FPM could not be installed from this OS's package archive.
+
+This usually means the distro is too new/pre-release for the PHP packages to be
+published yet (this box is '${PRETTY_NAME}'). The panel requires PHP-FPM for
+PHP/WordPress sites.
+
+How to fix:
+  • Recommended: install on a supported LTS release — Ubuntu 24.04 or 22.04, or
+    Debian 12 — where 'php-fpm' is available out of the box.
+  • Or, if a PHP-FPM package IS available under a different name, install it
+    manually and re-run this installer, e.g.:
+        apt-cache search --names-only '^php.*-fpm\$'
+        sudo apt-get install -y <that-package>
+        sudo bash scripts/install.sh"
 fi
+# Re-detect: an FPM for a DIFFERENT version than requested may have been
+# installed (e.g. the archive only ships php8.5-fpm). The panel adapts to it.
 PHP_VERSION="$(detect_php_version)"
 ok "PHP-FPM ${PHP_VERSION} is installed (pool dir: /etc/php/${PHP_VERSION}/fpm/pool.d)."
 
