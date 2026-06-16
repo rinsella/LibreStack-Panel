@@ -47,4 +47,9 @@ class Website extends Model
     {
         return $this->status === 'suspended';
     }
+
+    public function isDeleting(): bool
+    {
+        return $this->status === 'deleting';
+    }
 }

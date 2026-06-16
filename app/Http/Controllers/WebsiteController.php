@@ -6,6 +6,7 @@ use App\Models\User;
 use App\Models\Website;
 use App\Models\WebsiteAlias;
 use App\Jobs\ProvisionWebsiteJob;
+use App\Jobs\RemoveWebsiteJob;
 use App\Services\Nginx\NginxService;
 use App\Services\System\ServerInfoService;
 use App\Services\Website\WebsiteProvisioner;
@@ -150,14 +151,17 @@ class WebsiteController extends Controller
         $deleteFiles = $request->boolean('delete_files');
         $domain = $website->domain;
 
-        $this->provisioner->remove($website, $deleteFiles);
-        $website->delete();
+        // Mark the site as being removed and run the teardown on the queue
+        // worker. The teardown reloads php-fpm (which also serves the panel), so
+        // doing it synchronously in this request would 502 the panel.
+        $website->update(['status' => 'deleting', 'enabled' => false]);
+        RemoveWebsiteJob::dispatch($website->id, $deleteFiles);
 
         Audit::log('website.deleted', 'website', (string) $website->id, [
             'domain' => $domain, 'files_deleted' => $deleteFiles,
         ]);
 
-        return redirect()->route('websites.index')->with('success', "Website {$domain} deleted.");
+        return redirect()->route('websites.index')->with('success', "Website {$domain} is being removed.");
     }
 
     public function toggle(Website $website): RedirectResponse
@@ -191,18 +195,15 @@ class WebsiteController extends Controller
     {
         $this->authorize('update', $website);
 
-        // Re-run the full provisioner (idempotent): ensures the system user,
-        // directory tree, per-user PHP-FPM pool and Nginx config all exist. This
-        // recovers sites whose first provisioning failed (e.g. PHP-FPM for the
-        // chosen version was not installed yet).
-        $result = $this->provisioner->provision($website->fresh());
+        // Re-run the full provisioner on the QUEUE WORKER (idempotent): ensures
+        // the system user, directory tree, per-user PHP-FPM pool and Nginx
+        // config all exist. Running it here would reload php-fpm inside the
+        // request the panel is served by and 502 it, so dispatch a job instead.
+        ProvisionWebsiteJob::dispatch($website->id);
 
         Audit::log('website.redeployed', 'website', (string) $website->id);
 
-        return back()->with(
-            $result->ok || $result->disabled ? 'success' : 'error',
-            $result->ok || $result->disabled ? 'Website redeployed.' : ('Deploy failed: ' . $result->combined())
-        );
+        return back()->with('success', 'Website redeploy queued.');
     }
 
     protected function validateWebsite(Request $request, ?Website $website = null): array

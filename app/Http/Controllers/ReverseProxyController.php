@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Models\Website;
+use App\Jobs\RemoveWebsiteJob;
 use App\Services\Nginx\NginxService;
 use App\Services\Website\WebsiteProvisioner;
 use App\Support\Audit;
@@ -102,8 +103,8 @@ class ReverseProxyController extends Controller
         }
 
         $domain = $website->domain;
-        $this->provisioner->remove($website, false);
-        $website->delete();
+        $website->update(['status' => 'deleting', 'enabled' => false]);
+        RemoveWebsiteJob::dispatch($website->id, false);
 
         Audit::log('reverse_proxy.deleted', 'website', (string) $website->id, ['domain' => $domain]);
 

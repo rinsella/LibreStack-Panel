@@ -33,9 +33,13 @@
                             @else<span class="text-xs text-slate-400">none</span>@endif
                         </td>
                         <td>
-                            <x-badge :status="$website->isSuspended() ? 'suspended' : ($website->enabled ? 'active' : 'inactive')">
-                                {{ $website->isSuspended() ? 'Suspended' : ($website->enabled ? 'Active' : 'Disabled') }}
-                            </x-badge>
+                            @if ($website->isDeleting())
+                                <x-badge status="queued">Deleting…</x-badge>
+                            @else
+                                <x-badge :status="$website->isSuspended() ? 'suspended' : ($website->enabled ? 'active' : 'inactive')">
+                                    {{ $website->isSuspended() ? 'Suspended' : ($website->enabled ? 'Active' : 'Disabled') }}
+                                </x-badge>
+                            @endif
                         </td>
                         <td>
                             <div class="flex items-center justify-end gap-1">

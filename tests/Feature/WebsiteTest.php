@@ -86,4 +86,50 @@ class WebsiteTest extends TestCase
 
         $this->actingAs($auditor)->get('/websites')->assertForbidden();
     }
+
+    public function test_website_deletion_is_queued_and_removes_the_record(): void
+    {
+        $admin = $this->admin();
+
+        $website = Website::create([
+            'domain'          => 'del-test.com',
+            'user_id'         => $admin->id,
+            'type'            => 'php',
+            'php_version'     => '8.3',
+            'document_root'   => '/home/webuser/web/del-test.com/public_html',
+            'system_username' => 'webuser',
+            'status'          => 'active',
+            'enabled'         => true,
+        ]);
+
+        $this->actingAs($admin)
+            ->delete("/websites/{$website->id}")
+            ->assertRedirect(route('websites.index'));
+
+        // The teardown is dispatched to the queue (sync in tests) so the record
+        // is removed by RemoveWebsiteJob, not synchronously in the request.
+        $this->assertNull(Website::find($website->id));
+        $this->assertDatabaseHas('system_jobs', ['type' => 'website.delete']);
+    }
+
+    public function test_redeploy_queues_a_provision_job(): void
+    {
+        $admin = $this->admin();
+
+        $website = Website::create([
+            'domain'          => 'redeploy-test.com',
+            'user_id'         => $admin->id,
+            'type'            => 'static',
+            'document_root'   => '/home/webuser/web/redeploy-test.com/public_html',
+            'system_username' => 'webuser',
+            'status'          => 'active',
+            'enabled'         => true,
+        ]);
+
+        $this->actingAs($admin)
+            ->post("/websites/{$website->id}/redeploy")
+            ->assertRedirect();
+
+        $this->assertDatabaseHas('system_jobs', ['type' => 'website.create']);
+    }
 }
