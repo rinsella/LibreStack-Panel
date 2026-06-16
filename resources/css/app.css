@@ -1,0 +1,135 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+@source '../views/**/*.blade.php';
+
+@theme {
+    --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+        'Segoe UI Symbol', 'Noto Color Emoji';
+
+    /* Brand palette */
+    --color-navy-50: #f0f4fb;
+    --color-navy-100: #d9e2f3;
+    --color-navy-700: #1e2a4a;
+    --color-navy-800: #161f38;
+    --color-navy-900: #0f1626;
+    --color-navy-950: #0a0f1c;
+
+    --color-brand-50: #eff6ff;
+    --color-brand-100: #dbeafe;
+    --color-brand-200: #bfdbfe;
+    --color-brand-300: #93c5fd;
+    --color-brand-400: #60a5fa;
+    --color-brand-500: #3b82f6;
+    --color-brand-600: #2563eb;
+    --color-brand-700: #1d4ed8;
+    --color-brand-800: #1e40af;
+    --color-brand-900: #1e3a8a;
+}
+
+/* x-cloak for Alpine */
+[x-cloak] {
+    display: none !important;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
+/* ---------------------------------------------------------------------------
+   Reusable component classes (plain CSS so they are independent of @apply).
+--------------------------------------------------------------------------- */
+.ls-label {
+    display: block;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: #334155;
+    margin-bottom: 0.375rem;
+}
+
+.ls-input,
+.ls-select,
+.ls-textarea {
+    width: 100%;
+    border-radius: 0.625rem;
+    border: 1px solid #e2e8f0;
+    background: #fff;
+    padding: 0.55rem 0.75rem;
+    font-size: 0.875rem;
+    color: #0f172a;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.ls-input:focus,
+.ls-select:focus,
+.ls-textarea:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+.ls-textarea {
+    min-height: 7rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ls-help {
+    margin-top: 0.375rem;
+    font-size: 0.75rem;
+    color: #94a3b8;
+}
+
+.ls-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 0.625rem;
+    padding: 0.55rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.ls-btn-primary {
+    background: #2563eb;
+    color: #fff;
+    box-shadow: 0 1px 2px rgba(37, 99, 235, 0.3);
+}
+.ls-btn-primary:hover { background: #1d4ed8; }
+
+.ls-btn-secondary {
+    background: #fff;
+    color: #334155;
+    border: 1px solid #e2e8f0;
+}
+.ls-btn-secondary:hover { background: #f8fafc; }
+
+.ls-btn-danger { background: #dc2626; color: #fff; }
+.ls-btn-danger:hover { background: #b91c1c; }
+
+.ls-table {
+    width: 100%;
+    text-align: left;
+    font-size: 0.875rem;
+    border-collapse: collapse;
+}
+.ls-table thead th {
+    padding: 0.625rem 1rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #94a3b8;
+    border-bottom: 1px solid #f1f5f9;
+}
+.ls-table tbody td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #f1f5f9;
+    color: #334155;
+    vertical-align: middle;
+}
+.ls-table tbody tr:hover { background: #f8fafc; }
+
