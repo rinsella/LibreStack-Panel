@@ -190,6 +190,139 @@ class PrivilegedFs
         return (bool) config('librestack.system_enabled');
     }
 
+    // ---------------------------------------------------------------------
+    // File manager operations
+    // ---------------------------------------------------------------------
+    //
+    // Unlike the provisioning operations above, file-manager writes must work
+    // in EVERY mode: on a dev box the runtime user owns the website files (run
+    // in-process), and on a real VPS the files are owned by the site user so
+    // the work is performed as root through the sudo helper.
+
+    public function fileWrite(string $username, string $domain, string $relative, string $content): CommandResult
+    {
+        return $this->dispatchFs(
+            ['file-write', $username, $domain, $relative, base64_encode($content)],
+            fn () => $this->ops->fileWrite($username, $domain, $relative, $content),
+        );
+    }
+
+    public function fileUpload(string $username, string $domain, string $relative, string $sourceTmp): CommandResult
+    {
+        return $this->dispatchFs(
+            ['file-upload', $username, $domain, $relative, $sourceTmp],
+            fn () => $this->ops->fileUpload($username, $domain, $relative, $sourceTmp),
+        );
+    }
+
+    public function fileCreate(string $username, string $domain, string $relative): CommandResult
+    {
+        return $this->dispatchFs(
+            ['file-create', $username, $domain, $relative],
+            fn () => $this->ops->fileCreate($username, $domain, $relative),
+        );
+    }
+
+    public function dirCreate(string $username, string $domain, string $relative): CommandResult
+    {
+        return $this->dispatchFs(
+            ['dir-create', $username, $domain, $relative],
+            fn () => $this->ops->dirCreate($username, $domain, $relative),
+        );
+    }
+
+    public function fileRename(string $username, string $domain, string $from, string $to): CommandResult
+    {
+        return $this->dispatchFs(
+            ['file-rename', $username, $domain, $from, $to],
+            fn () => $this->ops->fileRename($username, $domain, $from, $to),
+        );
+    }
+
+    public function fileMove(string $username, string $domain, string $from, string $to): CommandResult
+    {
+        return $this->dispatchFs(
+            ['file-move', $username, $domain, $from, $to],
+            fn () => $this->ops->fileMove($username, $domain, $from, $to),
+        );
+    }
+
+    public function fileDelete(string $username, string $domain, string $relative): CommandResult
+    {
+        return $this->dispatchFs(
+            ['file-delete', $username, $domain, $relative],
+            fn () => $this->ops->fileDelete($username, $domain, $relative),
+        );
+    }
+
+    public function fileCopy(string $username, string $domain, string $from, string $to): CommandResult
+    {
+        return $this->dispatchFs(
+            ['file-copy', $username, $domain, $from, $to],
+            fn () => $this->ops->fileCopy($username, $domain, $from, $to),
+        );
+    }
+
+    public function fileChmod(string $username, string $domain, string $relative, string $octalMode): CommandResult
+    {
+        return $this->dispatchFs(
+            ['file-chmod', $username, $domain, $relative, $octalMode],
+            fn () => $this->ops->fileChmod($username, $domain, $relative, (int) octdec($octalMode)),
+        );
+    }
+
+    public function fileZip(string $username, string $domain, string $sourceRel, string $zipRel): CommandResult
+    {
+        return $this->dispatchFs(
+            ['file-zip', $username, $domain, $sourceRel, $zipRel],
+            fn () => $this->ops->fileZip($username, $domain, $sourceRel, $zipRel),
+        );
+    }
+
+    public function fileUnzip(string $username, string $domain, string $zipRel, string $destRel): CommandResult
+    {
+        return $this->dispatchFs(
+            ['file-unzip', $username, $domain, $zipRel, $destRel],
+            fn () => $this->ops->fileUnzip($username, $domain, $zipRel, $destRel),
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // PHP-FPM per-user pools (privileged; gated on system mode)
+    // ---------------------------------------------------------------------
+
+    public function phpFpmPoolWrite(string $username, string $phpVersion, string $poolConfig): CommandResult
+    {
+        return $this->dispatch(
+            ['php-fpm-pool-write', $username, $phpVersion, base64_encode($poolConfig)],
+            fn () => $this->ops->phpFpmPoolWrite($username, $phpVersion, $poolConfig),
+        );
+    }
+
+    public function phpFpmPoolDelete(string $username, string $phpVersion): CommandResult
+    {
+        return $this->dispatch(
+            ['php-fpm-pool-delete', $username, $phpVersion],
+            fn () => $this->ops->phpFpmPoolDelete($username, $phpVersion),
+        );
+    }
+
+    public function phpFpmTest(string $phpVersion): CommandResult
+    {
+        return $this->dispatch(
+            ['php-fpm-test', $phpVersion],
+            fn () => $this->ops->phpFpmTest($phpVersion),
+        );
+    }
+
+    public function phpFpmReload(string $phpVersion): CommandResult
+    {
+        return $this->dispatch(
+            ['php-fpm-reload', $phpVersion],
+            fn () => $this->ops->phpFpmReload($phpVersion),
+        );
+    }
+
     /**
      * @param  array<int, string>  $opArgs
      * @param  callable():void  $inProcess
@@ -205,6 +338,29 @@ class PrivilegedFs
         }
 
         // Already-root worker: run the operation directly and surface errors.
+        try {
+            $inProcess();
+
+            return new CommandResult(true, 0, 'ok', '');
+        } catch (Throwable $e) {
+            return new CommandResult(false, 1, '', $e->getMessage());
+        }
+    }
+
+    /**
+     * Dispatch a file-manager operation. These always perform the work (they are
+     * not gated on system_enabled): in-process when not using sudo, or through
+     * the root helper when use_sudo is on.
+     *
+     * @param  array<int, string>  $opArgs
+     * @param  callable():void  $inProcess
+     */
+    protected function dispatchFs(array $opArgs, callable $inProcess): CommandResult
+    {
+        if (config('librestack.use_sudo')) {
+            return $this->runViaSudo($opArgs);
+        }
+
         try {
             $inProcess();
 

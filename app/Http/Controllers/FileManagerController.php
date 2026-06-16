@@ -86,7 +86,11 @@ class FileManagerController extends Controller
             'content' => ['nullable', 'string'],
         ]);
 
-        $this->files->write($base, $data['file'], (string) $data['content']);
+        try {
+            $this->files->write($website, $data['file'], (string) $data['content']);
+        } catch (\Throwable $e) {
+            return back()->with('error', $e->getMessage());
+        }
         $this->record($request, 'edit', $data['file']);
 
         return redirect()
@@ -125,8 +129,16 @@ class FileManagerController extends Controller
         // Strip any directory components from the uploaded filename.
         $name = basename(str_replace('\\', '/', $name));
 
-        $target = $this->files->resolve($base, trim($relative . '/' . $name, '/'));
-        $request->file('file')->move(dirname($target), basename($target));
+        // Persist to a temp file the privileged helper can read, then store it
+        // into the website tree via the safe-op layer (owned by the site user).
+        $sourceTmp = $request->file('file')->getRealPath();
+        $target = trim($relative . '/' . $name, '/');
+
+        try {
+            $this->files->upload($website, $target, $sourceTmp);
+        } catch (\Throwable $e) {
+            return $this->backTo($website, $relative)->with('error', $e->getMessage());
+        }
 
         $this->record($request, 'upload', $relative . '/' . $name);
 
@@ -153,7 +165,11 @@ class FileManagerController extends Controller
         ]);
 
         $dir = (string) $data['path'];
-        $this->files->rename($base, $data['from'], trim($dir . '/' . basename($data['to']), '/'));
+        try {
+            $this->files->rename($website, $data['from'], trim($dir . '/' . basename($data['to']), '/'));
+        } catch (\Throwable $e) {
+            return $this->backTo($website, $dir)->with('error', $e->getMessage());
+        }
         $this->record($request, 'rename', $data['from'], $data['to']);
 
         return $this->backTo($website, $dir)->with('success', 'Renamed.');
@@ -168,7 +184,11 @@ class FileManagerController extends Controller
             'mode' => ['required', 'regex:/^[0-7]{3,4}$/'],
         ]);
 
-        $this->files->chmod($base, $data['file'], (int) octdec($data['mode']));
+        try {
+            $this->files->chmod($website, $data['file'], $data['mode']);
+        } catch (\Throwable $e) {
+            return $this->backTo($website, (string) $data['path'])->with('error', $e->getMessage());
+        }
         $this->record($request, 'chmod', $data['file']);
 
         return $this->backTo($website, (string) $data['path'])->with('success', 'Permissions updated.');
@@ -184,7 +204,11 @@ class FileManagerController extends Controller
 
         $dir = (string) $data['path'];
         $zipName = trim($dir . '/' . basename($data['file']) . '.zip', '/');
-        $this->files->zip($base, $data['file'], $zipName);
+        try {
+            $this->files->zip($website, $data['file'], $zipName);
+        } catch (\Throwable $e) {
+            return $this->backTo($website, $dir)->with('error', $e->getMessage());
+        }
         $this->record($request, 'zip', $data['file']);
 
         return $this->backTo($website, $dir)->with('success', 'Archive created.');
@@ -199,7 +223,11 @@ class FileManagerController extends Controller
         ]);
 
         $dir = (string) $data['path'];
-        $this->files->unzip($base, $data['file'], $dir);
+        try {
+            $this->files->unzip($website, $data['file'], $dir);
+        } catch (\Throwable $e) {
+            return $this->backTo($website, $dir)->with('error', $e->getMessage());
+        }
         $this->record($request, 'unzip', $data['file']);
 
         return $this->backTo($website, $dir)->with('success', 'Archive extracted.');
@@ -213,7 +241,11 @@ class FileManagerController extends Controller
             'file' => ['required', 'string'],
         ]);
 
-        $this->files->delete($base, $data['file']);
+        try {
+            $this->files->delete($website, $data['file']);
+        } catch (\Throwable $e) {
+            return $this->backTo($website, (string) $data['path'])->with('error', $e->getMessage());
+        }
         $this->record($request, 'delete', $data['file']);
 
         return $this->backTo($website, (string) $data['path'])->with('success', 'Deleted.');
@@ -230,9 +262,13 @@ class FileManagerController extends Controller
         $dir = (string) $data['path'];
         $relative = trim($dir . '/' . basename($data['name']), '/');
 
-        $kind === 'folder'
-            ? $this->files->makeDirectory($base, $relative)
-            : $this->files->createFile($base, $relative);
+        try {
+            $kind === 'folder'
+                ? $this->files->makeDirectory($website, $relative)
+                : $this->files->createFile($website, $relative);
+        } catch (\Throwable $e) {
+            return $this->backTo($website, $dir)->with('error', $e->getMessage());
+        }
 
         $this->record($request, 'create_' . $kind, $relative);
 

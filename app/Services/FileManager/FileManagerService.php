@@ -2,21 +2,32 @@
 
 namespace App\Services\FileManager;
 
+use App\Models\Website;
+use App\Services\Support\CommandResult;
+use App\Services\System\PrivilegedFs;
 use InvalidArgumentException;
 use RuntimeException;
-use ZipArchive;
 
 /**
- * Secure file manager. Every path is resolved with realpath and checked to be
- * inside an allowed base directory, defeating path traversal (../) attacks.
- * System-sensitive locations are always denied.
+ * Secure file manager.
+ *
+ * Read-only operations (browse/list/read/resolve) run directly because the web
+ * process can always read the website tree. Every WRITE/mutation operation is
+ * routed through the privileged safe-op layer (PrivilegedFs → SafeOps) so it
+ * works on a real VPS where the website files are owned by the site's Linux
+ * user rather than www-data. Path traversal, symlink escapes, zip-slip and
+ * zip-bombs are all rejected inside SafeOps.
  */
 class FileManagerService
 {
     /** Paths that must never be accessible regardless of base. */
     protected array $denied = [
-        '/etc', '/root', '/var/lib/mysql', '/proc', '/sys', '/boot', '/dev',
+        '/etc', '/root', '/var/lib/mysql', '/proc', '/sys', '/boot', '/dev', '/opt/librestack',
     ];
+
+    public function __construct(protected PrivilegedFs $fs)
+    {
+    }
 
     /**
      * Resolve a relative path against a base directory, enforcing that the
@@ -125,249 +136,74 @@ class FileManagerService
         return $nonText !== null && strlen($nonText) > strlen($sample) * 0.1;
     }
 
-    public function write(string $base, string $relative, string $content): void
+    // ---------------------------------------------------------------------
+    // Write operations — all routed through the privileged safe-op layer so
+    // they succeed on a real VPS where the files are owned by the site user.
+    // ---------------------------------------------------------------------
+
+    public function write(Website $website, string $relative, string $content): void
     {
-        $path = $this->resolve($base, $relative);
-        file_put_contents($path, $content);
+        $this->run($this->fs->fileWrite($website->system_username, $website->domain, $relative, $content));
     }
 
-    public function makeDirectory(string $base, string $relative): void
+    public function upload(Website $website, string $relative, string $sourceTmp): void
     {
-        $path = $this->resolve($base, $relative);
-        if (! is_dir($path)) {
-            mkdir($path, 0755, true);
-        }
+        $this->run($this->fs->fileUpload($website->system_username, $website->domain, $relative, $sourceTmp));
     }
 
-    public function createFile(string $base, string $relative): void
+    public function makeDirectory(Website $website, string $relative): void
     {
-        $path = $this->resolve($base, $relative);
-        if (! file_exists($path)) {
-            touch($path);
-        }
+        $this->run($this->fs->dirCreate($website->system_username, $website->domain, $relative));
     }
 
-    public function delete(string $base, string $relative): void
+    public function createFile(Website $website, string $relative): void
     {
-        $realBase = realpath($base);
-        if ($realBase === false) {
-            throw new RuntimeException('Base path does not exist.');
-        }
-        $path = $this->resolve($base, $relative);
-        $this->recursiveDelete($path, $realBase);
+        $this->run($this->fs->fileCreate($website->system_username, $website->domain, $relative));
     }
 
-    public function rename(string $base, string $from, string $to): void
+    public function delete(Website $website, string $relative): void
     {
-        $src = $this->resolve($base, $from);
-        $dst = $this->resolve($base, $to);
-        rename($src, $dst);
+        $this->run($this->fs->fileDelete($website->system_username, $website->domain, $relative));
     }
 
-    public function copy(string $base, string $from, string $to): void
+    public function rename(Website $website, string $from, string $to): void
     {
-        $realBase = realpath($base);
-        if ($realBase === false) {
-            throw new RuntimeException('Base path does not exist.');
-        }
-        $src = $this->resolve($base, $from);
-        $dst = $this->resolve($base, $to);
-
-        if (is_dir($src) && ! is_link($src)) {
-            $this->recursiveCopy($src, $dst, $realBase);
-        } else {
-            copy($src, $dst);
-        }
+        $this->run($this->fs->fileRename($website->system_username, $website->domain, $from, $to));
     }
 
-    public function chmod(string $base, string $relative, int $mode): void
+    public function move(Website $website, string $from, string $to): void
     {
-        $path = $this->resolve($base, $relative);
-        // Accept octal value such as 0644.
-        chmod($path, $mode);
+        $this->run($this->fs->fileMove($website->system_username, $website->domain, $from, $to));
     }
 
-    public function zip(string $base, string $relative, string $zipRelative): void
+    public function copy(Website $website, string $from, string $to): void
     {
-        $source = $this->resolve($base, $relative);
-        $target = $this->resolve($base, $zipRelative);
-
-        $zip = new ZipArchive();
-        if ($zip->open($target, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
-            throw new RuntimeException('Cannot create zip archive.');
-        }
-
-        if (is_dir($source)) {
-            $files = new \RecursiveIteratorIterator(
-                new \RecursiveDirectoryIterator($source, \FilesystemIterator::SKIP_DOTS)
-            );
-            foreach ($files as $file) {
-                $local = substr($file->getPathname(), strlen($source) + 1);
-                $zip->addFile($file->getPathname(), $local);
-            }
-        } else {
-            $zip->addFile($source, basename($source));
-        }
-        $zip->close();
+        $this->run($this->fs->fileCopy($website->system_username, $website->domain, $from, $to));
     }
 
-    public function unzip(string $base, string $relative, string $destRelative): void
+    public function chmod(Website $website, string $relative, string $octalMode): void
     {
-        $archive = $this->resolve($base, $relative);
-        $dest = $this->resolve($base, $destRelative);
+        $this->run($this->fs->fileChmod($website->system_username, $website->domain, $relative, $octalMode));
+    }
 
-        $zip = new ZipArchive();
-        if ($zip->open($archive) !== true) {
-            throw new RuntimeException('Cannot open zip archive.');
-        }
+    public function zip(Website $website, string $sourceRelative, string $zipRelative): void
+    {
+        $this->run($this->fs->fileZip($website->system_username, $website->domain, $sourceRelative, $zipRelative));
+    }
 
-        if (! is_dir($dest)) {
-            mkdir($dest, 0755, true);
-        }
-
-        $realDest = realpath($dest);
-        if ($realDest === false) {
-            $zip->close();
-            throw new RuntimeException('Destination directory could not be resolved.');
-        }
-        // The destination must itself stay inside the website base directory.
-        $this->assertNotDenied($realDest);
-
-        // Zip-bomb defence: cap the number of entries and the total
-        // uncompressed size before extracting anything.
-        $maxFiles = 10000;
-        $maxBytes = 512 * 1024 * 1024; // 512 MB
-
-        if ($zip->numFiles > $maxFiles) {
-            $zip->close();
-            throw new RuntimeException("Archive has too many entries ({$zip->numFiles} > {$maxFiles}).");
-        }
-
-        $totalUncompressed = 0;
-
-        // ZIP-slip + zip-bomb defence: validate EVERY entry before extracting.
-        for ($i = 0; $i < $zip->numFiles; $i++) {
-            $stat = $zip->statIndex($i);
-            if ($stat === false) {
-                $zip->close();
-                throw new RuntimeException('Unreadable zip entry.');
-            }
-            $entry = $stat['name'];
-
-            $totalUncompressed += (int) ($stat['size'] ?? 0);
-            if ($totalUncompressed > $maxBytes) {
-                $zip->close();
-                throw new RuntimeException('Archive uncompressed size exceeds the allowed limit.');
-            }
-
-            $this->assertSafeZipEntry($entry, $realDest);
-        }
-
-        if (! $zip->extractTo($realDest)) {
-            $zip->close();
-            throw new RuntimeException('Failed to extract archive.');
-        }
-        $zip->close();
+    public function unzip(Website $website, string $zipRelative, string $destRelative): void
+    {
+        $this->run($this->fs->fileUnzip($website->system_username, $website->domain, $zipRelative, $destRelative));
     }
 
     /**
-     * Reject dangerous zip entries (path traversal, absolute paths, drive paths,
-     * null bytes) and ensure the resolved destination stays inside $realDest.
+     * Surface a failed privileged operation as a clear exception so the UI shows
+     * an error instead of pretending the write succeeded.
      */
-    protected function assertSafeZipEntry(string $entry, string $realDest): void
+    protected function run(CommandResult $result): void
     {
-        if ($entry === '' || str_contains($entry, "\0")) {
-            throw new RuntimeException('Zip entry contains a null byte or is empty.');
-        }
-
-        // Normalise Windows separators for inspection.
-        $normalized = str_replace('\\', '/', $entry);
-
-        // Absolute POSIX path or Windows drive path (e.g. C:\ or C:/).
-        if (str_starts_with($normalized, '/') || preg_match('#^[A-Za-z]:#', $normalized)) {
-            throw new RuntimeException("Zip entry uses an absolute path: {$entry}");
-        }
-
-        // Any traversal segment.
-        foreach (explode('/', $normalized) as $segment) {
-            if ($segment === '..') {
-                throw new RuntimeException("Zip entry contains a traversal segment: {$entry}");
-            }
-        }
-
-        // Final containment check on the resolved target path.
-        $target = $realDest . '/' . ltrim($normalized, '/');
-        $targetReal = realpath(dirname($target));
-        // dirname may not exist yet for nested entries; walk up to an existing parent.
-        $check = $target;
-        while ($targetReal === false && $check !== '' && $check !== '/' && $check !== '.') {
-            $check = dirname($check);
-            $targetReal = realpath($check);
-        }
-
-        if ($targetReal === false || ! ($targetReal === $realDest || str_starts_with($targetReal . '/', $realDest . '/'))) {
-            throw new RuntimeException("Zip entry escapes the destination: {$entry}");
-        }
-    }
-
-    protected function recursiveDelete(string $path, string $base): void
-    {
-        // Never follow symlinks; remove the link itself.
-        if (is_link($path)) {
-            if (! unlink($path)) {
-                throw new RuntimeException('Failed to remove symlink.');
-            }
-
-            return;
-        }
-
-        // Every resolved path must stay inside the website base.
-        $real = realpath($path);
-        if ($real !== false && $real !== $base && ! str_starts_with($real, $base . '/')) {
-            throw new RuntimeException('Refusing to delete a path outside the website directory.');
-        }
-
-        if (is_dir($path)) {
-            foreach (scandir($path) ?: [] as $entry) {
-                if ($entry === '.' || $entry === '..') {
-                    continue;
-                }
-                $this->recursiveDelete($path . '/' . $entry, $base);
-            }
-            rmdir($path);
-        } else {
-            unlink($path);
-        }
-    }
-
-    protected function recursiveCopy(string $src, string $dst, string $base): void
-    {
-        // Refuse to copy a symlink that would let data escape the base.
-        if (is_link($src)) {
-            $target = realpath($src);
-            if ($target === false || ($target !== $base && ! str_starts_with($target, $base . '/'))) {
-                throw new RuntimeException('Refusing to copy a symlink that escapes the website directory.');
-            }
-        }
-
-        mkdir($dst, 0755, true);
-        foreach (scandir($src) ?: [] as $entry) {
-            if ($entry === '.' || $entry === '..') {
-                continue;
-            }
-            $from = $src . '/' . $entry;
-            $to = $dst . '/' . $entry;
-
-            if (is_link($from)) {
-                $target = realpath($from);
-                if ($target === false || ($target !== $base && ! str_starts_with($target, $base . '/'))) {
-                    throw new RuntimeException('Refusing to copy a symlink that escapes the website directory.');
-                }
-            }
-
-            is_dir($from) && ! is_link($from)
-                ? $this->recursiveCopy($from, $to, $base)
-                : copy($from, $to);
+        if (! $result->ok && ! $result->disabled) {
+            throw new RuntimeException($result->error !== '' ? $result->error : 'File operation failed.');
         }
     }
 

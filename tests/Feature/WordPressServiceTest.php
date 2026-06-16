@@ -83,6 +83,63 @@ class WordPressServiceTest extends TestCase
         $this->assertSame(0, DatabaseUser::count());
     }
 
+    public function test_wordpress_db_command_failure_prevents_install_and_rolls_back(): void
+    {
+        config(['librestack.system_enabled' => true]);
+
+        $website = $this->website();
+
+        // createDatabase succeeds, createUser fails → the database must be
+        // dropped, no panel records created, and the file install never starts.
+        $dropped = [];
+        $databases = new class($dropped) extends DatabaseService {
+            public function __construct(public array &$dropped)
+            {
+                parent::__construct(app(CommandRunner::class));
+            }
+
+            public function createDatabase(string $name): CommandResult
+            {
+                return new CommandResult(true, 0, 'ok', '');
+            }
+
+            public function createUser(string $user, string $password, string $host = 'localhost'): CommandResult
+            {
+                return new CommandResult(false, 1, '', 'mysql error');
+            }
+
+            public function dropDatabase(string $name): CommandResult
+            {
+                $this->dropped[] = "db:{$name}";
+
+                return new CommandResult(true, 0, 'ok', '');
+            }
+        };
+
+        // Runner reports enabled but its commands are never reached for files.
+        $runner = new class extends CommandRunner {
+            public function run(string $binary, array $args = [], ?int $timeout = 60, ?string $input = null): CommandResult
+            {
+                return new CommandResult(false, 1, '', 'should not be called');
+            }
+
+            public function isEnabled(): bool
+            {
+                return true;
+            }
+        };
+
+        $fs = new PrivilegedFs($runner, app(SafeOps::class));
+        $service = new WordPressService($runner, $databases, $fs);
+
+        $result = $service->install($website);
+
+        $this->assertFalse($result['ok']);
+        $this->assertContains('db:wp_' . substr(md5($website->domain), 0, 8), $dropped);
+        $this->assertSame(0, PanelDatabase::count());
+        $this->assertSame(0, DatabaseUser::count());
+    }
+
     public function test_install_refuses_non_empty_docroot_without_confirmation(): void
     {
         $this->seed([RolePermissionSeeder::class, SettingsSeeder::class]);

@@ -5,6 +5,7 @@ namespace App\Services\Website;
 use App\Models\Website;
 use App\Services\Nginx\NginxService;
 use App\Services\Support\CommandResult;
+use App\Services\System\PhpFpmService;
 use App\Services\System\PrivilegedFs;
 use App\Services\System\SystemUserService;
 
@@ -13,7 +14,8 @@ use App\Services\System\SystemUserService;
  *
  * No root-owned path is ever written directly by the web process: directory
  * creation, the placeholder index and deletion all go through PrivilegedFs
- * (the sudo-scoped safe-op layer). The owning Linux user is ensured first.
+ * (the sudo-scoped safe-op layer). The owning Linux user is ensured first, and
+ * PHP/WordPress sites get a dedicated per-user PHP-FPM pool.
  */
 class WebsiteProvisioner
 {
@@ -21,6 +23,7 @@ class WebsiteProvisioner
         protected NginxService $nginx,
         protected SystemUserService $users,
         protected PrivilegedFs $fs,
+        protected PhpFpmService $phpFpm,
     ) {
     }
 
@@ -55,14 +58,33 @@ class WebsiteProvisioner
             return $dirs;
         }
 
-        // 3. Drop a placeholder index for non-proxy sites.
+        // 3. PHP/WordPress sites get a dedicated per-user PHP-FPM pool so the
+        //    site runs as its own user (writable WordPress, plugins, uploads).
+        if ($this->needsPhpFpmPool($website)) {
+            $pool = $this->phpFpm->ensurePool($website->system_username, $this->phpVersion($website));
+            if (! $pool->ok && ! $pool->disabled) {
+                return $pool;
+            }
+        }
+
+        // 4. Drop a placeholder index for non-proxy sites.
         $index = $this->createIndex($website);
         if (! $index->ok && ! $index->disabled) {
             return $index;
         }
 
-        // 4. Deploy the nginx config.
+        // 5. Deploy the nginx config (uses the per-user FPM socket).
         return $this->nginx->deploy($website);
+    }
+
+    protected function needsPhpFpmPool(Website $website): bool
+    {
+        return in_array($website->type, ['php', 'wordpress'], true);
+    }
+
+    protected function phpVersion(Website $website): string
+    {
+        return (string) ($website->php_version ?: config('librestack.default_php'));
     }
 
     public function createDirectories(Website $website): CommandResult
@@ -93,6 +115,11 @@ class WebsiteProvisioner
     public function remove(Website $website, bool $deleteFiles = false): CommandResult
     {
         $result = $this->nginx->deleteConfig($website->domain);
+
+        // Tear down the per-user PHP-FPM pool for PHP/WordPress sites.
+        if ($this->needsPhpFpmPool($website)) {
+            $this->phpFpm->removePool($website->system_username, $this->phpVersion($website));
+        }
 
         if ($deleteFiles) {
             $base = $this->siteBase($website->system_username, $website->domain);

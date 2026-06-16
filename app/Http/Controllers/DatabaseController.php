@@ -75,10 +75,29 @@ class DatabaseController extends Controller
             }
         }
 
-        $this->databases->createDatabase($data['name']);
-        $this->databases->createUser($data['username'], $data['password']);
-        $this->databases->grant($data['username'], $data['name']);
+        // Every MySQL command result is checked; on failure we roll back the
+        // partially-created database/user and create NO panel records.
+        $create = $this->databases->createDatabase($data['name']);
+        if (! $this->succeeded($create)) {
+            return back()->withInput()->with('error', 'Failed to create database: ' . $create->combined());
+        }
 
+        $createUser = $this->databases->createUser($data['username'], $data['password']);
+        if (! $this->succeeded($createUser)) {
+            $this->databases->dropDatabase($data['name']);
+
+            return back()->withInput()->with('error', 'Failed to create database user: ' . $createUser->combined());
+        }
+
+        $grant = $this->databases->grant($data['username'], $data['name']);
+        if (! $this->succeeded($grant)) {
+            $this->databases->dropUser($data['username']);
+            $this->databases->dropDatabase($data['name']);
+
+            return back()->withInput()->with('error', 'Failed to grant privileges: ' . $grant->combined());
+        }
+
+        // Only now, after every command succeeded, persist panel metadata.
         $database = PanelDatabase::create([
             'name'       => $data['name'],
             'website_id' => $data['website_id'] ?? null,
@@ -92,6 +111,7 @@ class DatabaseController extends Controller
             'panel_database_id' => $database->id,
         ]);
 
+        // The password is never written to the audit log.
         Audit::log('database.created', 'database', (string) $database->id, [
             'name' => $data['name'], 'user' => $data['username'],
         ]);
@@ -106,22 +126,51 @@ class DatabaseController extends Controller
             ]);
     }
 
-    public function destroy(PanelDatabase $database): RedirectResponse
+    public function destroy(Request $request, PanelDatabase $database): RedirectResponse
     {
         $this->authorize('delete', $database);
 
-        foreach ($database->users as $user) {
-            $this->databases->dropUser($user->username, $user->host);
-        }
-        $this->databases->dropDatabase($database->name);
-
         $name = $database->name;
+        $failed = false;
+
+        foreach ($database->users as $user) {
+            if (! $this->succeeded($this->databases->dropUser($user->username, $user->host))) {
+                $failed = true;
+            }
+        }
+        if (! $this->succeeded($this->databases->dropDatabase($database->name))) {
+            $failed = true;
+        }
+
+        if ($failed) {
+            // Do not silently delete panel metadata when the real MySQL drop
+            // failed. A super-admin may force a metadata-only cleanup.
+            if ($request->boolean('force') && $request->user()->isAdmin()) {
+                $database->users()->delete();
+                $database->delete();
+                Audit::log('database.deleted_force', 'database', (string) $database->id, ['name' => $name]);
+
+                return back()->with('success', "Database metadata for '{$name}' removed (MySQL drop failed).");
+            }
+
+            return back()->with('error', "Failed to drop database '{$name}' in MySQL. Metadata was kept.");
+        }
+
         $database->users()->delete();
         $database->delete();
 
         Audit::log('database.deleted', 'database', (string) $database->id, ['name' => $name]);
 
         return back()->with('success', "Database '{$name}' deleted.");
+    }
+
+    /**
+     * A command "succeeded" if it actually ran successfully, or was skipped
+     * because the panel is in non-system (dev) mode.
+     */
+    protected function succeeded(\App\Services\Support\CommandResult $result): bool
+    {
+        return $result->ok || $result->disabled;
     }
 
     public function destroyUser(DatabaseUser $user): RedirectResponse

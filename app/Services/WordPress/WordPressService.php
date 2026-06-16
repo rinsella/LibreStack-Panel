@@ -38,10 +38,28 @@ class WordPressService
         $dbUser = 'wp_' . substr(md5($website->domain . 'user'), 0, 8);
         $dbPass = $this->databases->generatePassword();
 
-        // Provision the real MySQL database/user (no-op in dev mode).
-        $this->databases->createDatabase($dbName);
-        $this->databases->createUser($dbUser, $dbPass);
-        $this->databases->grant($dbUser, $dbName);
+        // Provision the real MySQL database/user, checking every command result.
+        // On failure we roll back the real database/user and create NO records,
+        // and the WordPress file installation never starts.
+        $create = $this->databases->createDatabase($dbName);
+        if (! $this->dbSucceeded($create)) {
+            return ['ok' => false, 'message' => 'Failed to create the WordPress database.', 'db' => []];
+        }
+
+        $createUser = $this->databases->createUser($dbUser, $dbPass);
+        if (! $this->dbSucceeded($createUser)) {
+            $this->databases->dropDatabase($dbName);
+
+            return ['ok' => false, 'message' => 'Failed to create the WordPress database user.', 'db' => []];
+        }
+
+        $grant = $this->databases->grant($dbUser, $dbName);
+        if (! $this->dbSucceeded($grant)) {
+            $this->databases->dropUser($dbUser);
+            $this->databases->dropDatabase($dbName);
+
+            return ['ok' => false, 'message' => 'Failed to grant WordPress database privileges.', 'db' => []];
+        }
 
         // Track the database in the panel so DB Manager + backups see it.
         [$panelDb, $userRecord] = $this->trackDatabase($website, $dbName, $dbUser);
@@ -105,6 +123,15 @@ class WordPressService
         } finally {
             $this->cleanupStaging($work, $tmp);
         }
+    }
+
+    /**
+     * A database command "succeeded" if it ran successfully, or was skipped
+     * because the panel is in non-system (dev) mode.
+     */
+    protected function dbSucceeded(\App\Services\Support\CommandResult $result): bool
+    {
+        return $result->ok || $result->disabled;
     }
 
     /**

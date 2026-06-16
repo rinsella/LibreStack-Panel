@@ -90,8 +90,10 @@ class SystemCommandTest extends TestCase
 
         $config = app(NginxService::class)->generateConfig($website);
 
-        $this->assertStringContainsString('fastcgi_pass unix:/run/php/php', $config);
-        $this->assertStringContainsString('-fpm.sock', $config);
+        // PHP/WordPress sites use the dedicated per-user PHP-FPM pool socket,
+        // never the shared global socket.
+        $this->assertStringContainsString('fastcgi_pass unix:/run/php/librestack-webuser.sock', $config);
+        $this->assertStringNotContainsString('php-fpm.sock', $config);
     }
 
     public function test_installer_default_php_is_a_supported_version(): void

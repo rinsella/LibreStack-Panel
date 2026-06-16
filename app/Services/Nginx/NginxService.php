@@ -128,25 +128,20 @@ class NginxService
     }
 
     /**
-     * Resolve the PHP-FPM socket for a website. Prefers the site's configured
-     * version, but if that socket is absent it falls back to any PHP-FPM socket
-     * present on the host so generated configs always point at a real socket.
+     * Resolve the PHP-FPM socket for a website. PHP/WordPress sites run under a
+     * dedicated per-user PHP-FPM pool (provisioned by PhpFpmService) so the
+     * config always points at /run/php/librestack-{username}.sock — never the
+     * shared global socket.
      */
     protected function fpmSocket(Website $website): string
     {
-        $php = $website->php_version ?: config('librestack.default_php');
-        $expected = "/run/php/php{$php}-fpm.sock";
+        $username = $website->system_username;
 
-        if (@file_exists($expected)) {
-            return "unix:{$expected}";
+        if (! Validators::isValidUsername((string) $username)) {
+            throw new InvalidArgumentException("Invalid system username: {$username}");
         }
 
-        $found = glob('/run/php/php*-fpm.sock') ?: [];
-        if ($found !== []) {
-            return 'unix:' . $found[0];
-        }
-
-        return "unix:{$expected}";
+        return "unix:/run/php/librestack-{$username}.sock";
     }
 
     protected function proxyConfig(Website $website): string
