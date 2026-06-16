@@ -97,4 +97,18 @@ class ZipSlipTest extends TestCase
         $this->assertFileExists($this->base . '/safe/hello.txt');
         $this->assertSame('hi', file_get_contents($this->base . '/safe/hello.txt'));
     }
+
+    public function test_rejects_archive_with_too_many_entries(): void
+    {
+        $path = $this->base . '/bomb.zip';
+        $zip = new ZipArchive();
+        $zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+        for ($i = 0; $i <= 10001; $i++) {
+            $zip->addFromString("f{$i}.txt", 'x');
+        }
+        $zip->close();
+
+        $this->expectException(RuntimeException::class);
+        (new FileManagerService())->unzip($this->base, 'bomb.zip', '');
+    }
 }

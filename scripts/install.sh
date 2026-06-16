@@ -115,7 +115,7 @@ PACKAGES=(
     composer nodejs npm
     mariadb-server
     certbot python3-certbot-nginx
-    unzip curl git ufw
+    unzip curl git ufw sudo
 )
 
 # Fall back to distro default php-* metapackages if the versioned ones are absent.
@@ -123,8 +123,12 @@ if ! apt-get install -y "${PACKAGES[@]}"; then
     warn "Versioned PHP packages unavailable; falling back to generic php-* metapackages."
     apt-get install -y nginx php-cli php-fpm php-sqlite3 php-mysql php-curl php-zip \
         php-mbstring php-xml php-bcmath php-common composer nodejs npm mariadb-server \
-        certbot python3-certbot-nginx unzip curl git ufw
+        certbot python3-certbot-nginx unzip curl git ufw sudo
 fi
+
+# sudo is mandatory: the panel performs all privileged work through it.
+command -v sudo >/dev/null 2>&1 || die "sudo is required but could not be installed."
+command -v visudo >/dev/null 2>&1 || die "visudo is required but could not be installed."
 ok "System packages installed."
 
 # --------------------------------------------------------------------------
@@ -149,8 +153,29 @@ chown -R "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}" "${LOG_DIR}"
 # --------------------------------------------------------------------------
 # Detect the PHP-FPM version that actually got installed and the real socket.
 PHP_VERSION="$(detect_php_version)"
+
+# Guarantee the installed PHP meets the composer requirement (>= 8.3).
+php_at_least() {
+    php -r 'exit((PHP_VERSION_ID >= '"$1"') ? 0 : 1);' >/dev/null 2>&1
+}
+if ! php_at_least 80300; then
+    die "PHP 8.3+ is required (composer.json needs ^8.3) but $(php -r 'echo PHP_VERSION;') is active. Install/enable PHP 8.3 and retry."
+fi
+
+# Make sure the PHP-FPM service for the detected version is enabled and running
+# so the socket exists before we detect it.
+FPM_SERVICE="php${PHP_VERSION}-fpm"
+if systemctl list-unit-files 2>/dev/null | grep -q "^${FPM_SERVICE}"; then
+    systemctl enable --now "${FPM_SERVICE}" >/dev/null 2>&1 || systemctl restart "${FPM_SERVICE}" || true
+fi
+
 PHP_SOCK="$(detect_php_socket "${PHP_VERSION}")"
+[ -S "${PHP_SOCK}" ] || warn "PHP-FPM socket ${PHP_SOCK} not found yet; it should appear once php-fpm is running."
 ok "Using PHP ${PHP_VERSION} (FPM socket: ${PHP_SOCK})."
+
+# Best-effort detection of the server's primary IP for APP_URL.
+SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+APP_URL_HOST="${SERVER_IP:-127.0.0.1}"
 
 if [ ! -f .env ]; then
     log "Creating .env from template…"
@@ -163,7 +188,10 @@ sed -i 's/^LIBRESTACK_USE_SUDO=.*/LIBRESTACK_USE_SUDO=true/' .env
 grep -q '^LIBRESTACK_USE_SUDO=' .env || echo 'LIBRESTACK_USE_SUDO=true' >> .env
 sed -i "s/^LIBRESTACK_DEFAULT_PHP=.*/LIBRESTACK_DEFAULT_PHP=${PHP_VERSION}/" .env
 grep -q '^LIBRESTACK_DEFAULT_PHP=' .env || echo "LIBRESTACK_DEFAULT_PHP=${PHP_VERSION}" >> .env
-sed -i "s#^APP_URL=.*#APP_URL=http://127.0.0.1:${PANEL_PORT}#" .env
+sed -i "s#^APP_URL=.*#APP_URL=http://${APP_URL_HOST}:${PANEL_PORT}#" .env
+# Point the safe-op helper at the install directory.
+grep -q '^LIBRESTACK_SAFE_OP_SCRIPT=' .env \
+    || echo "LIBRESTACK_SAFE_OP_SCRIPT=${APP_DIR}/scripts/librestack-safe-op" >> .env
 
 log "Installing PHP dependencies…"
 composer install --no-dev --optimize-autoloader --no-interaction
@@ -173,6 +201,7 @@ php artisan key:generate --force
 
 log "Preparing SQLite database…"
 touch database/database.sqlite
+chown "${SERVICE_USER}:${SERVICE_USER}" database/database.sqlite
 php artisan migrate --force --seed
 
 log "Building front-end assets…"
@@ -180,25 +209,34 @@ npm install --no-audit --no-fund
 npm run build
 
 php artisan storage:link || true
-php artisan config:cache || true
-php artisan route:cache || true
 
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/storage" "${APP_DIR}/bootstrap/cache" "${APP_DIR}/database"
 chmod -R ug+rw "${APP_DIR}/storage" "${APP_DIR}/bootstrap/cache"
+
+# Cache config + routes. Closure routes were removed, so route:cache must pass.
+php artisan config:cache
+php artisan route:cache
+php artisan view:cache || true
 ok "Application prepared."
 
 # --------------------------------------------------------------------------
 # Privileged command allowlist (sudoers)
 # --------------------------------------------------------------------------
 # The panel and its queue worker run as ${SERVICE_USER} (never as root, and
-# PHP-FPM is NOT run as root). The few privileged binaries the panel needs are
-# granted through a tightly scoped, NOPASSWD sudoers allowlist. The CommandRunner
-# only ever executes these binaries with array arguments — never a shell string.
+# PHP-FPM is NOT run as root). Privileged FILESYSTEM work (writing /etc/nginx,
+# creating /home/<user>/web trees, chown/chmod, tar copy/extract) goes through
+# ONE root helper: scripts/librestack-safe-op, which validates every path.
+# A few service-control binaries (systemctl, nginx -t/reload, certbot, ufw,
+# mariadb client, useradd, crontab) are additionally allowed for the specific
+# operations the panel performs with strictly validated array arguments.
 log "Installing sudoers allowlist for ${SERVICE_USER}…"
 resolve_bin() { command -v "$1" 2>/dev/null || echo ""; }
 
+SAFE_OP="${APP_DIR}/scripts/librestack-safe-op"
+chmod 0755 "${SAFE_OP}" 2>/dev/null || true
+
 SUDO_BINS=()
-for b in systemctl nginx certbot ufw chown chmod find mysql mysqldump crontab journalctl; do
+for b in systemctl nginx certbot ufw mysql mysqldump crontab journalctl useradd; do
     p="$(resolve_bin "$b")"
     [ -n "${p}" ] && SUDO_BINS+=("${p}")
 done
@@ -207,7 +245,9 @@ SUDOERS_FILE="/etc/sudoers.d/librestack"
 SUDOERS_TMP="$(mktemp)"
 {
     echo "# Managed by LibreStack Panel. Do not edit manually."
-    echo "# Grants ${SERVICE_USER} NOPASSWD access to ONLY these exact binaries."
+    echo "# Primary privilege boundary: the root-owned safe-op helper only."
+    printf '%s ALL=(root) NOPASSWD: %s *\n' "${SERVICE_USER}" "${SAFE_OP}"
+    echo "# Service-control binaries used with strictly validated arguments."
     if [ "${#SUDO_BINS[@]}" -gt 0 ]; then
         printf '%s ALL=(root) NOPASSWD: %s\n' "${SERVICE_USER}" "$(IFS=, ; echo "${SUDO_BINS[*]}")"
     fi
@@ -215,11 +255,12 @@ SUDOERS_TMP="$(mktemp)"
 
 if visudo -cf "${SUDOERS_TMP}" >/dev/null 2>&1; then
     install -m 0440 -o root -g root "${SUDOERS_TMP}" "${SUDOERS_FILE}"
+    rm -f "${SUDOERS_TMP}"
     ok "Sudoers allowlist installed at ${SUDOERS_FILE}."
 else
-    warn "Generated sudoers file failed validation; skipping (privileged actions will be unavailable)."
+    rm -f "${SUDOERS_TMP}"
+    die "Generated sudoers file failed visudo validation. Aborting to avoid a broken/insecure sudoers."
 fi
-rm -f "${SUDOERS_TMP}"
 
 # --------------------------------------------------------------------------
 # systemd queue worker
@@ -245,6 +286,17 @@ EOF
 systemctl daemon-reload
 systemctl enable --now librestack-queue.service
 ok "Queue worker running."
+
+# --------------------------------------------------------------------------
+# Ensure core services are enabled and running
+# --------------------------------------------------------------------------
+log "Enabling core services (nginx, mariadb, php-fpm)…"
+for svc in nginx mariadb "${FPM_SERVICE}"; do
+    if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}"; then
+        systemctl enable --now "${svc}" >/dev/null 2>&1 || warn "Could not enable/start ${svc}."
+    fi
+done
+ok "Core services enabled."
 
 # --------------------------------------------------------------------------
 # Laravel scheduler (system cron)
@@ -309,6 +361,13 @@ ufw allow 80/tcp   >/dev/null 2>&1 || true
 ufw allow 443/tcp  >/dev/null 2>&1 || true
 ufw allow ${PANEL_PORT}/tcp >/dev/null 2>&1 || true
 ok "Firewall rules added (UFW not force-enabled; enable it from the panel when ready)."
+
+# --------------------------------------------------------------------------
+# Preflight diagnostics
+# --------------------------------------------------------------------------
+log "Running preflight diagnostics (librestack:doctor)…"
+sudo -u "${SERVICE_USER}" php "${APP_DIR}/artisan" librestack:doctor --install || \
+    warn "Some preflight checks reported issues. Review the output above before going live."
 
 # --------------------------------------------------------------------------
 # Done

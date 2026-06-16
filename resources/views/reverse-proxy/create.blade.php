@@ -19,6 +19,7 @@
                 <label class="ls-label" for="upstream_url">Upstream URL</label>
                 <input class="ls-input" id="upstream_url" name="upstream_url" value="{{ old('upstream_url') }}" placeholder="http://127.0.0.1:3000" required />
             </div>
+            @if ($owners->isNotEmpty())
             <div>
                 <label class="ls-label" for="user_id">Owner (optional)</label>
                 <select class="ls-select" id="user_id" name="user_id">
@@ -28,6 +29,7 @@
                     @endforeach
                 </select>
             </div>
+            @endif
         </div>
         <div class="mt-5 flex flex-wrap gap-6 border-t border-slate-100 pt-4">
             <label class="flex items-center gap-2 text-sm text-slate-600">

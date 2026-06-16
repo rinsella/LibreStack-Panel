@@ -2,7 +2,6 @@
 
 namespace App\Jobs;
 
-use App\Models\PanelDatabase;
 use App\Models\SystemJob;
 use App\Models\Website;
 use App\Services\WordPress\WordPressService;
@@ -41,13 +40,6 @@ class InstallWordPressJob extends BaseSystemJob
         }
 
         $website->update(['type' => 'wordpress']);
-
-        if (! empty($result['db']['name'])) {
-            PanelDatabase::firstOrCreate(
-                ['name' => $result['db']['name']],
-                ['website_id' => $website->id, 'user_id' => $website->user_id]
-            );
-        }
 
         return 'WordPress installed for ' . $website->domain;
     }

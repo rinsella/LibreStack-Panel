@@ -24,24 +24,34 @@ class ReverseProxyController extends Controller
     ) {
     }
 
-    public function index()
+    public function index(Request $request)
     {
+        $user = $request->user();
+
         $sites = Website::whereIn('type', ['reverse_proxy', 'node_proxy'])
+            ->when(! $user->isAdmin(), fn ($q) => $q->where('user_id', $user->id))
             ->latest()
             ->paginate(15);
 
         return view('reverse-proxy.index', compact('sites'));
     }
 
-    public function create()
+    public function create(Request $request)
     {
+        // Only admins may assign an owner; everyone else owns what they create.
+        $owners = $request->user()->isAdmin()
+            ? User::orderBy('name')->get()
+            : collect();
+
         return view('reverse-proxy.create', [
-            'owners' => User::orderBy('name')->get(),
+            'owners' => $owners,
         ]);
     }
 
     public function store(Request $request): RedirectResponse
     {
+        $this->authorize('create', Website::class);
+
         $data = $request->validate([
             'domain'          => ['required', 'string', 'max:253', 'unique:websites,domain'],
             'system_username' => ['required', 'string', 'max:32'],
@@ -57,9 +67,12 @@ class ReverseProxyController extends Controller
             return back()->withInput()->withErrors(['system_username' => 'Invalid system username.']);
         }
 
+        // Non-admins always own what they create and may not set user_id.
+        $ownerId = $request->user()->isAdmin() ? ($data['user_id'] ?? null) : $request->user()->id;
+
         $website = Website::create([
             'domain'          => $data['domain'],
-            'user_id'         => $data['user_id'] ?? null,
+            'user_id'         => $ownerId,
             'type'            => $data['type'],
             'document_root'   => $this->provisioner->documentRoot($data['system_username'], $data['domain']),
             'system_username' => $data['system_username'],
@@ -82,6 +95,12 @@ class ReverseProxyController extends Controller
 
     public function destroy(Website $website): RedirectResponse
     {
+        $this->authorize('delete', $website);
+
+        if (! in_array($website->type, ['reverse_proxy', 'node_proxy'], true)) {
+            return back()->with('error', 'This website is not a reverse proxy.');
+        }
+
         $domain = $website->domain;
         $this->provisioner->remove($website, false);
         $website->delete();

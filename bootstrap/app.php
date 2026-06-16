@@ -16,6 +16,11 @@ return Application::configure(basePath: dirname(__DIR__))
             'permission' => \App\Http\Middleware\CheckPermission::class,
         ]);
 
+        // Security headers on every web response.
+        $middleware->web(append: [
+            \App\Http\Middleware\SecurityHeaders::class,
+        ]);
+
         // Enforce first-run setup on every request. Registered globally (and
         // prepended) so it always runs before route middleware such as `auth`
         // — otherwise an unauthenticated request to a protected route would be

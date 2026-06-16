@@ -30,18 +30,23 @@ return [
     */
     'use_sudo' => (bool) env('LIBRESTACK_USE_SUDO', false),
 
+    /*
+    | Absolute path to the privileged-operation wrapper script. www-data is
+    | granted NOPASSWD sudo access to ONLY this script; it forwards to the
+    | allowlisted `librestack:safe-op` artisan command.
+    */
+    'safe_op_script' => env('LIBRESTACK_SAFE_OP_SCRIPT', '/opt/librestack/scripts/librestack-safe-op'),
+
     'privileged_binaries' => [
         'systemctl',
         'nginx',
         'certbot',
         'ufw',
-        'chown',
-        'chmod',
-        'find',
         'mysql',
         'mysqldump',
         'crontab',
         'journalctl',
+        'useradd',
     ],
 
     /*
@@ -104,6 +109,8 @@ return [
         'curl',
         'crontab',
         'sudo',
+        'useradd',
+        'id',
     ],
 
     /*

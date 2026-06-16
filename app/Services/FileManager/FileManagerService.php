@@ -97,7 +97,32 @@ class FileManagerService
             throw new RuntimeException('File too large to edit (2MB limit).');
         }
 
-        return (string) file_get_contents($path);
+        $content = (string) file_get_contents($path);
+
+        if ($this->looksBinary($content)) {
+            throw new RuntimeException('Refusing to edit a binary file.');
+        }
+
+        return $content;
+    }
+
+    /**
+     * Heuristic binary detection: any NUL byte, or a high proportion of
+     * non-text control bytes, means we refuse to open it in the text editor.
+     */
+    protected function looksBinary(string $content): bool
+    {
+        if ($content === '') {
+            return false;
+        }
+        if (str_contains($content, "\0")) {
+            return true;
+        }
+
+        $sample = substr($content, 0, 8000);
+        $nonText = preg_replace('/[\x09\x0A\x0D\x20-\x7E\x80-\xFF]/', '', $sample);
+
+        return $nonText !== null && strlen($nonText) > strlen($sample) * 0.1;
     }
 
     public function write(string $base, string $relative, string $content): void
@@ -124,8 +149,12 @@ class FileManagerService
 
     public function delete(string $base, string $relative): void
     {
+        $realBase = realpath($base);
+        if ($realBase === false) {
+            throw new RuntimeException('Base path does not exist.');
+        }
         $path = $this->resolve($base, $relative);
-        $this->recursiveDelete($path);
+        $this->recursiveDelete($path, $realBase);
     }
 
     public function rename(string $base, string $from, string $to): void
@@ -137,11 +166,15 @@ class FileManagerService
 
     public function copy(string $base, string $from, string $to): void
     {
+        $realBase = realpath($base);
+        if ($realBase === false) {
+            throw new RuntimeException('Base path does not exist.');
+        }
         $src = $this->resolve($base, $from);
         $dst = $this->resolve($base, $to);
 
-        if (is_dir($src)) {
-            $this->recursiveCopy($src, $dst);
+        if (is_dir($src) && ! is_link($src)) {
+            $this->recursiveCopy($src, $dst, $realBase);
         } else {
             copy($src, $dst);
         }
@@ -200,13 +233,33 @@ class FileManagerService
         // The destination must itself stay inside the website base directory.
         $this->assertNotDenied($realDest);
 
-        // ZIP-slip defence: validate EVERY entry before extracting anything.
+        // Zip-bomb defence: cap the number of entries and the total
+        // uncompressed size before extracting anything.
+        $maxFiles = 10000;
+        $maxBytes = 512 * 1024 * 1024; // 512 MB
+
+        if ($zip->numFiles > $maxFiles) {
+            $zip->close();
+            throw new RuntimeException("Archive has too many entries ({$zip->numFiles} > {$maxFiles}).");
+        }
+
+        $totalUncompressed = 0;
+
+        // ZIP-slip + zip-bomb defence: validate EVERY entry before extracting.
         for ($i = 0; $i < $zip->numFiles; $i++) {
-            $entry = $zip->getNameIndex($i);
-            if ($entry === false) {
+            $stat = $zip->statIndex($i);
+            if ($stat === false) {
                 $zip->close();
                 throw new RuntimeException('Unreadable zip entry.');
             }
+            $entry = $stat['name'];
+
+            $totalUncompressed += (int) ($stat['size'] ?? 0);
+            if ($totalUncompressed > $maxBytes) {
+                $zip->close();
+                throw new RuntimeException('Archive uncompressed size exceeds the allowed limit.');
+            }
+
             $this->assertSafeZipEntry($entry, $realDest);
         }
 
@@ -257,14 +310,29 @@ class FileManagerService
         }
     }
 
-    protected function recursiveDelete(string $path): void
+    protected function recursiveDelete(string $path, string $base): void
     {
-        if (is_dir($path) && ! is_link($path)) {
+        // Never follow symlinks; remove the link itself.
+        if (is_link($path)) {
+            if (! unlink($path)) {
+                throw new RuntimeException('Failed to remove symlink.');
+            }
+
+            return;
+        }
+
+        // Every resolved path must stay inside the website base.
+        $real = realpath($path);
+        if ($real !== false && $real !== $base && ! str_starts_with($real, $base . '/')) {
+            throw new RuntimeException('Refusing to delete a path outside the website directory.');
+        }
+
+        if (is_dir($path)) {
             foreach (scandir($path) ?: [] as $entry) {
                 if ($entry === '.' || $entry === '..') {
                     continue;
                 }
-                $this->recursiveDelete($path . '/' . $entry);
+                $this->recursiveDelete($path . '/' . $entry, $base);
             }
             rmdir($path);
         } else {
@@ -272,8 +340,16 @@ class FileManagerService
         }
     }
 
-    protected function recursiveCopy(string $src, string $dst): void
+    protected function recursiveCopy(string $src, string $dst, string $base): void
     {
+        // Refuse to copy a symlink that would let data escape the base.
+        if (is_link($src)) {
+            $target = realpath($src);
+            if ($target === false || ($target !== $base && ! str_starts_with($target, $base . '/'))) {
+                throw new RuntimeException('Refusing to copy a symlink that escapes the website directory.');
+            }
+        }
+
         mkdir($dst, 0755, true);
         foreach (scandir($src) ?: [] as $entry) {
             if ($entry === '.' || $entry === '..') {
@@ -281,7 +357,17 @@ class FileManagerService
             }
             $from = $src . '/' . $entry;
             $to = $dst . '/' . $entry;
-            is_dir($from) ? $this->recursiveCopy($from, $to) : copy($from, $to);
+
+            if (is_link($from)) {
+                $target = realpath($from);
+                if ($target === false || ($target !== $base && ! str_starts_with($target, $base . '/'))) {
+                    throw new RuntimeException('Refusing to copy a symlink that escapes the website directory.');
+                }
+            }
+
+            is_dir($from) && ! is_link($from)
+                ? $this->recursiveCopy($from, $to, $base)
+                : copy($from, $to);
         }
     }
 

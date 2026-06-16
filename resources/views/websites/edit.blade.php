@@ -32,6 +32,7 @@
                 <label class="ls-label" for="upstream_url">Upstream URL</label>
                 <input class="ls-input" id="upstream_url" name="upstream_url" value="{{ old('upstream_url', $website->upstream_url) }}" placeholder="http://127.0.0.1:3000" />
             </div>
+            @if ($owners->isNotEmpty())
             <div>
                 <label class="ls-label" for="user_id">Owner</label>
                 <select class="ls-select" id="user_id" name="user_id">
@@ -41,6 +42,7 @@
                     @endforeach
                 </select>
             </div>
+            @endif
             <div class="sm:col-span-2">
                 <label class="ls-label" for="aliases">Custom aliases</label>
                 <input class="ls-input" id="aliases" name="aliases" value="{{ old('aliases', $website->aliases->pluck('domain')->implode(', ')) }}" />

@@ -88,7 +88,7 @@ class SystemCommandTest extends TestCase
             'system_username' => 'webuser',
         ]);
 
-        $config = (new NginxService(new CommandRunner()))->generateConfig($website);
+        $config = app(NginxService::class)->generateConfig($website);
 
         $this->assertStringContainsString('fastcgi_pass unix:/run/php/php', $config);
         $this->assertStringContainsString('-fpm.sock', $config);

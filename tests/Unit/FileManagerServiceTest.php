@@ -59,4 +59,46 @@ class FileManagerServiceTest extends TestCase
         $this->assertContains('hello.txt', $names);
         $this->assertContains('sub', $names);
     }
+
+    public function test_rejects_binary_file_edit(): void
+    {
+        $binary = $this->base . '/image.bin';
+        file_put_contents($binary, "PK\x03\x04\0\0\0binarydata\xff\xfe");
+
+        $service = new FileManagerService();
+
+        $this->expectException(RuntimeException::class);
+        $service->read($this->base, 'image.bin');
+
+        @unlink($binary);
+    }
+
+    public function test_delete_refuses_symlink_escaping_base(): void
+    {
+        // A symlink inside the base pointing outside it must not let delete
+        // follow it to the external target.
+        $outside = sys_get_temp_dir() . '/ls_fm_outside_' . uniqid();
+        @mkdir($outside, 0755, true);
+        file_put_contents($outside . '/secret.txt', 'secret');
+
+        $link = $this->base . '/escape';
+        @symlink($outside, $link);
+
+        $service = new FileManagerService();
+
+        // Resolving a symlink that points outside the base is refused outright.
+        try {
+            $service->delete($this->base, 'escape');
+            $this->fail('Expected the escaping symlink delete to be refused.');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('outside', $e->getMessage());
+        }
+
+        // The external target survives regardless.
+        $this->assertFileExists($outside . '/secret.txt');
+
+        @unlink($link);
+        @unlink($outside . '/secret.txt');
+        @rmdir($outside);
+    }
 }

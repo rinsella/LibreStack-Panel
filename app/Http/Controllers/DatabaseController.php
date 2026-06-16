@@ -37,10 +37,14 @@ class DatabaseController extends Controller
         return view('databases.index', compact('items', 'search'));
     }
 
-    public function create()
+    public function create(Request $request)
     {
+        $user = $request->user();
+
         return view('databases.create', [
-            'websites' => Website::orderBy('domain')->get(),
+            'websites' => Website::query()
+                ->when(! $user->isAdmin(), fn ($q) => $q->where('user_id', $user->id))
+                ->orderBy('domain')->get(),
             'suggestedPassword' => $this->databases->generatePassword(),
         ]);
     }
@@ -61,6 +65,14 @@ class DatabaseController extends Controller
         }
         if (! Validators::isValidDatabaseUser($data['username'])) {
             return back()->withInput()->withErrors(['username' => 'Invalid database username.']);
+        }
+
+        // Non-admins may only attach a database to a website they own.
+        if (! empty($data['website_id'])) {
+            $website = Website::findOrFail($data['website_id']);
+            if (! $request->user()->isAdmin() && (int) $website->user_id !== (int) $request->user()->id) {
+                return back()->withInput()->withErrors(['website_id' => 'You do not own that website.']);
+            }
         }
 
         $this->databases->createDatabase($data['name']);

@@ -53,7 +53,7 @@ Route::post('/logout', [LoginController::class, 'destroy'])
 |--------------------------------------------------------------------------
 */
 Route::middleware('auth')->group(function () {
-    Route::get('/', fn () => redirect()->route('dashboard'));
+    Route::redirect('/', '/dashboard');
     Route::get('/dashboard', DashboardController::class)->name('dashboard');
 
     // Profile & password (available to every authenticated user)

@@ -168,16 +168,23 @@ class DatabaseService
             throw new RuntimeException('Unable to create a temporary credentials file.');
         }
 
-        // Restrict to owner read/write BEFORE writing the secret.
-        @chmod($file, 0600);
+        // tempnam() creates the file 0600; enforce it explicitly before writing
+        // the secret so the admin password can never be world-readable.
+        if (! chmod($file, 0600)) {
+            unlink($file);
+            throw new RuntimeException('Unable to secure the temporary credentials file.');
+        }
 
         $contents = "[client]\nuser=\"" . $this->escapeMyCnf($user) . "\"\n";
         if ($pass !== '') {
             $contents .= 'password="' . $this->escapeMyCnf($pass) . "\"\n";
         }
 
-        file_put_contents($file, $contents);
-        @chmod($file, 0600);
+        if (file_put_contents($file, $contents) === false) {
+            unlink($file);
+            throw new RuntimeException('Unable to write the temporary credentials file.');
+        }
+        chmod($file, 0600);
 
         return $file;
     }

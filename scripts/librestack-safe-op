@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#
+# LibreStack Panel — privileged operation wrapper.
+#
+# This is the ONLY command www-data is permitted to run as root, via the scoped
+# /etc/sudoers.d/librestack allowlist:
+#
+#   www-data ALL=(root) NOPASSWD: /opt/librestack/scripts/librestack-safe-op *
+#
+# It simply forwards its arguments to the allowlisted `librestack:safe-op`
+# artisan command, which performs strict validation before touching anything.
+#
+set -euo pipefail
+
+APP_DIR="${LIBRESTACK_APP_DIR:-/opt/librestack}"
+PHP_BIN="${LIBRESTACK_PHP_BIN:-/usr/bin/php}"
+
+exec "${PHP_BIN}" "${APP_DIR}/artisan" librestack:safe-op "$@"

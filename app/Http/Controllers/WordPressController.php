@@ -15,9 +15,13 @@ class WordPressController extends Controller
     {
     }
 
-    public function index()
+    public function index(Request $request)
     {
-        $sites = Website::whereIn('type', ['wordpress', 'php'])->latest()->get()
+        $user = $request->user();
+
+        $sites = Website::whereIn('type', ['wordpress', 'php'])
+            ->when(! $user->isAdmin(), fn ($q) => $q->where('user_id', $user->id))
+            ->latest()->get()
             ->map(function (Website $site) {
                 $site->wp_version = $this->wordpress->detectVersion($site);
 
@@ -35,6 +39,7 @@ class WordPressController extends Controller
         ]);
 
         $website = Website::findOrFail($data['website_id']);
+        $this->authorize('update', $website);
 
         // Refuse to overwrite a non-empty docroot unless confirmed.
         $docroot = $website->document_root;

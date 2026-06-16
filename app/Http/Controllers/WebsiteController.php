@@ -37,10 +37,10 @@ class WebsiteController extends Controller
         return view('websites.index', compact('websites', 'search'));
     }
 
-    public function create()
+    public function create(Request $request)
     {
         return view('websites.create', [
-            'owners'    => User::orderBy('name')->get(),
+            'owners'    => $request->user()->isAdmin() ? User::orderBy('name')->get() : collect(),
             'siteTypes' => config('librestack.site_types'),
             'phpVersions' => config('librestack.php_versions'),
         ]);
@@ -111,7 +111,7 @@ class WebsiteController extends Controller
 
         return view('websites.edit', [
             'website'     => $website->load('aliases'),
-            'owners'      => User::orderBy('name')->get(),
+            'owners'      => request()->user()->isAdmin() ? User::orderBy('name')->get() : collect(),
             'siteTypes'   => config('librestack.site_types'),
             'phpVersions' => config('librestack.php_versions'),
         ]);

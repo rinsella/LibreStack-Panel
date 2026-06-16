@@ -33,7 +33,9 @@ class BackupController extends Controller
                         ->orWhereHas('website', fn ($w) => $w->where('user_id', $user->id));
                 })
                 ->latest()->paginate(15),
-            'schedules' => BackupSchedule::with('website')->latest()->get(),
+            'schedules' => BackupSchedule::with('website')
+                ->when(! $user->isAdmin(), fn ($q) => $q->whereHas('website', fn ($w) => $w->where('user_id', $user->id)))
+                ->latest()->get(),
             'websites'  => $ownedWebsites->orderBy('domain')->get(),
         ]);
     }
@@ -110,6 +112,14 @@ class BackupController extends Controller
 
     public function destroySchedule(BackupSchedule $schedule): RedirectResponse
     {
+        // A schedule tied to a website is gated by that website's policy; an
+        // orphaned schedule (no website) may only be removed by an admin.
+        if ($schedule->website) {
+            $this->authorize('update', $schedule->website);
+        } elseif (! request()->user()->isAdmin()) {
+            abort(403);
+        }
+
         $schedule->delete();
 
         Audit::log('backup_schedule.deleted', 'backup_schedule', (string) $schedule->id);

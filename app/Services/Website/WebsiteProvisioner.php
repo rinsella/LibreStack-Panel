@@ -5,15 +5,23 @@ namespace App\Services\Website;
 use App\Models\Website;
 use App\Services\Nginx\NginxService;
 use App\Services\Support\CommandResult;
-use App\Support\Validators;
+use App\Services\System\PrivilegedFs;
+use App\Services\System\SystemUserService;
 
 /**
  * Provisions the on-disk structure for a website and deploys its Nginx config.
+ *
+ * No root-owned path is ever written directly by the web process: directory
+ * creation, the placeholder index and deletion all go through PrivilegedFs
+ * (the sudo-scoped safe-op layer). The owning Linux user is ensured first.
  */
 class WebsiteProvisioner
 {
-    public function __construct(protected NginxService $nginx)
-    {
+    public function __construct(
+        protected NginxService $nginx,
+        protected SystemUserService $users,
+        protected PrivilegedFs $fs,
+    ) {
     }
 
     /**
@@ -35,52 +43,66 @@ class WebsiteProvisioner
 
     public function provision(Website $website): CommandResult
     {
-        $this->createDirectories($website);
-        $this->createIndex($website);
+        // 1. Ensure the owning Linux user exists (no shell access).
+        $ensureUser = $this->users->ensure($website->system_username);
+        if (! $ensureUser->ok && ! $ensureUser->disabled) {
+            return $ensureUser;
+        }
 
+        // 2. Create the directory tree (root-owned op, then chowned to the user).
+        $dirs = $this->createDirectories($website);
+        if (! $dirs->ok && ! $dirs->disabled) {
+            return $dirs;
+        }
+
+        // 3. Drop a placeholder index for non-proxy sites.
+        $index = $this->createIndex($website);
+        if (! $index->ok && ! $index->disabled) {
+            return $index;
+        }
+
+        // 4. Deploy the nginx config.
         return $this->nginx->deploy($website);
     }
 
-    public function createDirectories(Website $website): void
+    public function createDirectories(Website $website): CommandResult
     {
-        $base = dirname($website->document_root);
-
-        foreach ([
+        return $this->fs->createSiteDirs(
+            $website->system_username,
+            $website->domain,
             $website->document_root,
-            $base . '/logs',
-            $base . '/backups',
-        ] as $dir) {
-            if (! is_dir($dir)) {
-                @mkdir($dir, 0755, true);
-            }
-        }
+        );
     }
 
-    public function createIndex(Website $website): void
+    public function createIndex(Website $website): CommandResult
     {
         if ($website->type === 'reverse_proxy' || $website->type === 'node_proxy') {
-            return;
-        }
-
-        $index = rtrim($website->document_root, '/') . '/index.html';
-        if (is_file($index)) {
-            return;
+            return new CommandResult(true, 0, 'no index for proxy site', '');
         }
 
         $domain = htmlspecialchars($website->domain, ENT_QUOTES);
-        @file_put_contents($index, $this->indexHtml($domain));
+
+        return $this->fs->writeSiteIndex(
+            $website->system_username,
+            $website->domain,
+            $website->document_root,
+            $this->indexHtml($domain),
+        );
     }
 
-    public function remove(Website $website, bool $deleteFiles = false): void
+    public function remove(Website $website, bool $deleteFiles = false): CommandResult
     {
-        $this->nginx->deleteConfig($website->domain);
+        $result = $this->nginx->deleteConfig($website->domain);
 
         if ($deleteFiles) {
-            $base = dirname($website->document_root);
-            if (is_dir($base) && str_starts_with($base, (string) config('librestack.paths.web_root'))) {
-                $this->recursiveDelete($base);
+            $base = $this->siteBase($website->system_username, $website->domain);
+            $delete = $this->fs->deleteSiteBase($website->system_username, $website->domain, $base);
+            if (! $delete->ok && ! $delete->disabled) {
+                return $delete;
             }
         }
+
+        return $result;
     }
 
     protected function indexHtml(string $domain): string
@@ -111,20 +133,5 @@ class WebsiteProvisioner
 </body>
 </html>
 HTML;
-    }
-
-    protected function recursiveDelete(string $path): void
-    {
-        if (is_dir($path) && ! is_link($path)) {
-            foreach (scandir($path) ?: [] as $entry) {
-                if ($entry === '.' || $entry === '..') {
-                    continue;
-                }
-                $this->recursiveDelete($path . '/' . $entry);
-            }
-            @rmdir($path);
-        } else {
-            @unlink($path);
-        }
     }
 }

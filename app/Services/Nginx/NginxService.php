@@ -5,6 +5,7 @@ namespace App\Services\Nginx;
 use App\Models\Website;
 use App\Services\Support\CommandResult;
 use App\Services\Support\CommandRunner;
+use App\Services\System\PrivilegedFs;
 use App\Support\Validators;
 use InvalidArgumentException;
 
@@ -17,8 +18,10 @@ use InvalidArgumentException;
  */
 class NginxService
 {
-    public function __construct(protected CommandRunner $runner)
-    {
+    public function __construct(
+        protected CommandRunner $runner,
+        protected PrivilegedFs $fs,
+    ) {
     }
 
     public function availablePath(string $domain): string
@@ -173,7 +176,8 @@ class NginxService
     }
 
     /**
-     * Deploy a website's config: write, test, rollback on failure, reload.
+     * Deploy a website's config atomically: write, enable, test, rollback on any
+     * failure, then reload. Never reports success unless every step succeeded.
      */
     public function deploy(Website $website): CommandResult
     {
@@ -186,27 +190,48 @@ class NginxService
             return new CommandResult(true, 0, "[dev] config generated for {$website->domain}", '');
         }
 
-        $available = $this->availablePath($website->domain);
-        $previous = is_file($available) ? (string) file_get_contents($available) : null;
+        $domain = $website->domain;
 
-        file_put_contents($available, $config);
-        $this->symlink($website->domain);
+        // Snapshot the previous config (if any) so we can roll back.
+        $previous = $this->fs->readNginxConfig($domain);
+        $existedBefore = $previous !== null;
 
+        // 1. Write the new config.
+        $write = $this->fs->writeNginxConfig($domain, $config);
+        if (! $write->ok) {
+            return $write;
+        }
+
+        // 2. Enable the symlink.
+        $enable = $this->fs->enableNginxSite($domain);
+        if (! $enable->ok) {
+            $this->rollback($domain, $previous, $existedBefore);
+
+            return $enable;
+        }
+
+        // 3. Test the configuration.
         $test = $this->test();
-
         if (! $test->ok) {
-            // Rollback
-            if ($previous !== null) {
-                file_put_contents($available, $previous);
-            } else {
-                @unlink($available);
-                @unlink($this->enabledPath($website->domain));
-            }
+            $this->rollback($domain, $previous, $existedBefore);
 
             return $test;
         }
 
+        // 4. Reload nginx.
         return $this->reload();
+    }
+
+    protected function rollback(string $domain, ?string $previous, bool $existedBefore): void
+    {
+        if ($existedBefore && $previous !== null) {
+            // Restore the previous config and keep it enabled.
+            $this->fs->writeNginxConfig($domain, $previous);
+            $this->fs->enableNginxSite($domain);
+        } else {
+            // Nothing existed before: remove what we just created.
+            $this->fs->deleteNginxSite($domain);
+        }
     }
 
     public function test(): CommandResult
@@ -230,7 +255,10 @@ class NginxService
             return new CommandResult(true, 0, '[dev] enabled', '');
         }
 
-        $this->symlink($domain);
+        $enable = $this->fs->enableNginxSite($domain);
+        if (! $enable->ok) {
+            return $enable;
+        }
 
         return $this->reload();
     }
@@ -241,19 +269,26 @@ class NginxService
             return new CommandResult(true, 0, '[dev] disabled', '');
         }
 
-        @unlink($this->enabledPath($domain));
+        $disable = $this->fs->disableNginxSite($domain);
+        if (! $disable->ok) {
+            return $disable;
+        }
 
         return $this->reload();
     }
 
-    public function deleteConfig(string $domain): void
+    public function deleteConfig(string $domain): CommandResult
     {
-        @unlink($this->enabledPath($domain));
-        @unlink($this->availablePath($domain));
-
-        if ($this->runner->isEnabled()) {
-            $this->reload();
+        if (! $this->runner->isEnabled()) {
+            return new CommandResult(true, 0, '[dev] config deleted', '');
         }
+
+        $delete = $this->fs->deleteNginxSite($domain);
+        if (! $delete->ok) {
+            return $delete;
+        }
+
+        return $this->reload();
     }
 
     public function status(): string
@@ -263,23 +298,13 @@ class NginxService
         return $result->disabled ? 'unknown' : (trim($result->output) ?: 'inactive');
     }
 
-    protected function symlink(string $domain): void
-    {
-        $available = $this->availablePath($domain);
-        $enabled = $this->enabledPath($domain);
-
-        if (! is_link($enabled) && ! is_file($enabled)) {
-            @symlink($available, $enabled);
-        }
-    }
-
     protected function stashPreview(Website $website, string $config): void
     {
         $dir = storage_path('app/nginx-preview');
-        if (! is_dir($dir)) {
-            @mkdir($dir, 0775, true);
+        if (! is_dir($dir) && ! mkdir($dir, 0775, true) && ! is_dir($dir)) {
+            return;
         }
-        @file_put_contents($dir . '/' . $this->slug($website->domain) . '.conf', $config);
+        file_put_contents($dir . '/' . $this->slug($website->domain) . '.conf', $config);
     }
 
     protected function slug(string $domain): string

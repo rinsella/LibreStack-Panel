@@ -7,6 +7,7 @@ use App\Models\PanelDatabase;
 use App\Models\Website;
 use App\Services\Database\DatabaseService;
 use App\Services\Support\CommandRunner;
+use App\Services\System\PrivilegedFs;
 use App\Support\Validators;
 use InvalidArgumentException;
 use RuntimeException;
@@ -14,12 +15,17 @@ use RuntimeException;
 /**
  * Creates and restores backups of website files and/or databases.
  * Archives are stored under the configured backup path, namespaced per domain.
+ *
+ * All root-owned filesystem work (reading /home website files, extracting into
+ * a site, copying files back) goes through the privileged safe-op layer; the
+ * web process never touches those paths directly.
  */
 class BackupService
 {
     public function __construct(
         protected CommandRunner $runner,
         protected DatabaseService $databases,
+        protected PrivilegedFs $fs,
     ) {
     }
 
@@ -32,8 +38,8 @@ class BackupService
         $root = rtrim((string) config('librestack.paths.backups'), '/')
             . '/' . Validators::domainSlug($domain);
 
-        if (! is_dir($root)) {
-            @mkdir($root, 0750, true);
+        if (! is_dir($root) && ! mkdir($root, 0750, true) && ! is_dir($root)) {
+            throw new RuntimeException("Failed to create backup directory: {$root}");
         }
 
         return $root;
@@ -60,7 +66,9 @@ class BackupService
         ]);
 
         try {
-            @mkdir($staging, 0750, true);
+            if (! is_dir($staging) && ! mkdir($staging, 0750, true) && ! is_dir($staging)) {
+                throw new RuntimeException('Failed to create backup staging directory.');
+            }
 
             $databases = [];
             if (in_array($type, ['database', 'full'], true)) {
@@ -108,7 +116,9 @@ class BackupService
     protected function dumpDatabases(Website $website, string $staging): array
     {
         $dbDir = $staging . '/databases';
-        @mkdir($dbDir, 0750, true);
+        if (! is_dir($dbDir) && ! mkdir($dbDir, 0750, true) && ! is_dir($dbDir)) {
+            throw new RuntimeException('Failed to create database dump directory.');
+        }
 
         $included = [];
         foreach (PanelDatabase::where('website_id', $website->id)->get() as $db) {
@@ -127,19 +137,21 @@ class BackupService
 
     /**
      * Bundle the staged metadata/dumps and (for files/full) the document root
-     * into a single gzip archive. Throws on tar failure.
+     * into a single gzip archive via the privileged safe-op. Throws on failure.
      */
     protected function buildArchive(Website $website, string $type, string $staging, string $path): void
     {
         if (! $this->runner->isEnabled()) {
             // Dev mode: tar is unavailable; write a placeholder so the workflow
             // completes and remains testable.
-            @file_put_contents($path, "LibreStack dev backup for {$website->domain} ({$type})\n");
+            if (file_put_contents($path, "LibreStack dev backup for {$website->domain} ({$type})\n") === false) {
+                throw new RuntimeException('Failed to write dev backup placeholder.');
+            }
 
             return;
         }
 
-        $args = ['-czf', $path, '-C', $staging, '.'];
+        $args = ['-C', $staging, '.'];
 
         if (in_array($type, ['files', 'full'], true) && is_dir($website->document_root)) {
             $args[] = '-C';
@@ -147,16 +159,17 @@ class BackupService
             $args[] = basename($website->document_root);
         }
 
-        $result = $this->runner->run('tar', $args, 600);
+        $result = $this->fs->createTar($path, $args);
 
-        if (! $result->ok) {
-            throw new RuntimeException('tar failed: ' . $result->combined());
+        if (! $result->ok && ! $result->disabled) {
+            throw new RuntimeException('Archive creation failed: ' . $result->combined());
         }
     }
 
     /**
      * Restore files and databases from a backup bundle. Returns true only when
-     * every part of the restore succeeded.
+     * every part of the restore succeeded. Files are restored ONLY into the
+     * website's own document root (never outside it) via the safe-op layer.
      */
     public function restore(Backup $backup): bool
     {
@@ -174,32 +187,34 @@ class BackupService
             return false;
         }
 
-        $tmp = sys_get_temp_dir() . '/ls_restore_' . uniqid();
-        @mkdir($tmp, 0750, true);
+        // Extract into a staging area under the (managed) backup root so the
+        // privileged extractor accepts the destination and traversal is checked.
+        $tmp = $this->backupRoot($website->domain) . '/.restore_' . uniqid();
 
         try {
-            $extract = $this->runner->run('tar', ['-xzf', $backup->path, '-C', $tmp], 600);
-            if (! $extract->ok) {
+            $extract = $this->fs->extractTar($backup->path, $tmp);
+            if (! $extract->ok && ! $extract->disabled) {
                 return false;
             }
 
-            // Restore files.
+            // Restore files into the website's own document root only.
             $filesDir = $tmp . '/' . basename($website->document_root);
             if (is_dir($filesDir)) {
-                if (! is_dir($website->document_root)) {
-                    @mkdir($website->document_root, 0755, true);
-                }
-                $copy = $this->runner->run('cp', ['-aT', $filesDir, $website->document_root], 600);
-                if (! $copy->ok) {
+                $copy = $this->fs->copyTree($filesDir, $website->document_root);
+                if (! $copy->ok && ! $copy->disabled) {
                     return false;
                 }
             }
 
-            // Restore databases.
+            // Restore databases that belong to this website (per metadata).
             $dbDir = $tmp . '/databases';
             if (is_dir($dbDir)) {
+                $allowed = $this->allowedDatabaseNames($website, $tmp);
                 foreach (glob($dbDir . '/*.sql') ?: [] as $sql) {
                     $name = basename($sql, '.sql');
+                    if ($allowed !== null && ! in_array($name, $allowed, true)) {
+                        continue; // never import a DB not recorded for this site
+                    }
                     $result = $this->databases->import($name, $sql);
                     if (! $result->ok && ! $result->disabled) {
                         return false;
@@ -209,8 +224,28 @@ class BackupService
 
             return true;
         } finally {
+            // Best-effort cleanup of the staging area.
             $this->recursiveDelete($tmp);
         }
+    }
+
+    /**
+     * The database names this website is allowed to restore, taken from the
+     * archive metadata (falling back to the live PanelDatabase records).
+     *
+     * @return array<int, string>|null  null = no metadata, allow recorded DBs
+     */
+    protected function allowedDatabaseNames(Website $website, string $extractDir): ?array
+    {
+        $metaFile = $extractDir . '/metadata.json';
+        if (is_file($metaFile)) {
+            $meta = json_decode((string) file_get_contents($metaFile), true);
+            if (is_array($meta) && isset($meta['databases']) && is_array($meta['databases'])) {
+                return array_values(array_filter($meta['databases'], 'is_string'));
+            }
+        }
+
+        return PanelDatabase::where('website_id', $website->id)->pluck('name')->all();
     }
 
     public function delete(Backup $backup): void
