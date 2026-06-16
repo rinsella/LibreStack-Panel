@@ -47,7 +47,18 @@ php artisan view:cache
 chown -R "${SERVICE_USER}:${SERVICE_USER}" storage bootstrap/cache database
 
 log "Restarting queue worker…"
+# A long-running worker holds STALE code/config in memory, so it must be
+# restarted on every update or it silently keeps running the old version (this
+# is the #1 cause of "I updated but nothing changed" — e.g. SSL/PHP fixes not
+# taking effect). Restart BEFORE redeploying sites so the worker is healthy.
 systemctl restart librestack-queue.service || true
+
+log "Regenerating site vhosts with the current template…"
+# Self-heal: rewrite every managed site's nginx config from the current
+# template. This repairs vhosts that drifted on older versions (e.g. an HTTPS
+# server block that an earlier redeploy used to wipe out), so upgrading is
+# enough — no manual per-site fix is ever required.
+php artisan librestack:redeploy-sites || true
 
 log "Bringing the application back online…"
 php artisan up
