@@ -48,7 +48,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # on every supported distro (Ubuntu 22.04 ships PHP 8.1, Debian 12 ships 8.2).
 #   - Ubuntu: ppa:ondrej/php  (https://launchpad.net/~ondrej/+archive/ubuntu/php)
 #   - Debian: packages.sury.org/php  (https://deb.sury.org/)
+#
+# Brand-new / pre-release Ubuntu versions (e.g. 26.04 "resolute") are not always
+# published on the PPA yet, which makes `add-apt-repository` leave a broken source
+# behind and `apt-get update` fail with a 404. Those releases already ship PHP
+# >= 8.3 themselves, so we skip the PPA for them rather than abort the install.
 # --------------------------------------------------------------------------
+
+# True when the ondrej/php PPA actually publishes packages for the given Ubuntu
+# codename (i.e. a dists/<codename>/Release file exists). A definitive 404 means
+# the release simply isn't published yet; transient network errors are retried so
+# we don't wrongly skip the PPA on a supported release.
+ondrej_php_ppa_available() {
+    [ -n "${1:-}" ] || return 1
+    local url="https://ppa.launchpadcontent.net/ondrej/php/ubuntu/dists/${1}/Release"
+    local code attempt
+    for attempt in 1 2 3; do
+        code="$(curl -fsSL --max-time 15 -o /dev/null -w '%{http_code}' "${url}" 2>/dev/null)" \
+            && [ "${code}" = "200" ] && return 0
+        [ "${code}" = "404" ] && return 1
+        sleep 2
+    done
+    return 1
+}
+
 setup_php_repo() {
     log "Configuring PHP ${PHP_VERSION_DEFAULT} package repository for ${ID}…"
     apt-get install -y ca-certificates apt-transport-https lsb-release gnupg curl >/dev/null
@@ -56,8 +79,20 @@ setup_php_repo() {
     case "${ID}" in
         ubuntu)
             apt-get install -y software-properties-common >/dev/null
-            if ! grep -rq "ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-                LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php
+            local codename="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+            if ondrej_php_ppa_available "${codename}"; then
+                if grep -rq "ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+                    ok "ppa:ondrej/php is already configured."
+                else
+                    LC_ALL=C.UTF-8 add-apt-repository -y ppa:ondrej/php \
+                        || warn "Could not add ppa:ondrej/php; relying on the distro's default PHP packages."
+                fi
+            else
+                warn "ppa:ondrej/php has no packages for Ubuntu '${codename:-unknown}' yet; relying on the distro's own PHP (Ubuntu 24.04+ already ships PHP >= 8.3)."
+                # Drop any half-configured PPA entry left by a previous failed run
+                # so it doesn't break apt-get update for the rest of the install.
+                rm -f /etc/apt/sources.list.d/*ondrej*php*.list \
+                      /etc/apt/sources.list.d/*ondrej*php*.sources 2>/dev/null || true
             fi
             ;;
         debian)
@@ -71,7 +106,7 @@ setup_php_repo() {
             warn "Unknown distro '${ID}'; relying on the distro's default PHP packages."
             ;;
     esac
-    apt-get update -y
+    apt-get update -y || warn "apt-get update reported errors; continuing best-effort."
 }
 
 # --------------------------------------------------------------------------
@@ -105,7 +140,7 @@ setup_php_repo
 
 log "Updating apt and installing dependencies (this can take a few minutes)…"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
+apt-get update -y || warn "apt-get update reported errors; continuing best-effort."
 
 PHP="php${PHP_VERSION_DEFAULT}"
 PACKAGES=(
