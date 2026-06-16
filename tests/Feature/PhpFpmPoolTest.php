@@ -143,4 +143,50 @@ class PhpFpmPoolTest extends TestCase
         $this->assertFalse($result->ok);
         $this->assertStringContainsString('php-fpm pool failed', $result->error);
     }
+
+    public function test_resolve_installed_version_passes_through_in_dev_mode(): void
+    {
+        // In non-system (dev) mode the requested version is returned unchanged,
+        // even if the host has no matching PHP-FPM, so dev boxes keep working.
+        config(['librestack.system_enabled' => false]);
+
+        $service = app(PhpFpmService::class);
+
+        $this->assertSame('8.4', $service->resolveInstalledVersion('8.4'));
+        $this->assertSame('8.1', $service->resolveInstalledVersion('8.1'));
+    }
+
+    public function test_resolve_installed_version_falls_back_to_an_installed_version(): void
+    {
+        config(['librestack.system_enabled' => true]);
+
+        // Stub installedVersions() to simulate a host that only has 8.3 FPM.
+        $service = new class(app(PrivilegedFs::class)) extends PhpFpmService {
+            public function installedVersions(): array
+            {
+                return ['8.3'];
+            }
+        };
+
+        // A requested-but-uninstalled version is coerced to the installed one…
+        $this->assertSame('8.3', $service->resolveInstalledVersion('8.4'));
+        // …while a version that IS installed is kept as-is.
+        $this->assertSame('8.3', $service->resolveInstalledVersion('8.3'));
+    }
+
+    public function test_resolve_installed_version_keeps_preferred_when_nothing_detected(): void
+    {
+        config(['librestack.system_enabled' => true]);
+
+        // No FPM detected at all (e.g. before php-fpm is installed): keep the
+        // requested version rather than guessing.
+        $service = new class(app(PrivilegedFs::class)) extends PhpFpmService {
+            public function installedVersions(): array
+            {
+                return [];
+            }
+        };
+
+        $this->assertSame('8.4', $service->resolveInstalledVersion('8.4'));
+    }
 }

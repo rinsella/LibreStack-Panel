@@ -32,6 +32,49 @@ class PhpFpmService
     }
 
     /**
+     * PHP versions that actually have PHP-FPM installed on this host, detected
+     * from the presence of /etc/php/<version>/fpm/pool.d (created by the
+     * phpX.Y-fpm package). Sorted ascending. Empty on dev boxes / non-system
+     * mode where no real PHP-FPM is present.
+     *
+     * @return array<int, string>
+     */
+    public function installedVersions(): array
+    {
+        $found = [];
+        foreach (glob('/etc/php/*/fpm/pool.d', GLOB_ONLYDIR) ?: [] as $dir) {
+            $version = basename(dirname(dirname($dir)));
+            if (preg_match('/^\d+\.\d+$/', $version)) {
+                $found[] = $version;
+            }
+        }
+        sort($found, SORT_NATURAL);
+
+        return $found;
+    }
+
+    /**
+     * Resolve a requested PHP version to one whose PHP-FPM is actually
+     * installed. If the requested version has no FPM (e.g. the site was created
+     * offering a version that was never installed) the highest installed
+     * version is used instead so provisioning can still succeed. In non-system
+     * mode (dev) the requested version is returned unchanged.
+     */
+    public function resolveInstalledVersion(string $preferred): string
+    {
+        if (! config('librestack.system_enabled')) {
+            return $preferred;
+        }
+
+        $installed = $this->installedVersions();
+        if ($installed === [] || in_array($preferred, $installed, true)) {
+            return $preferred;
+        }
+
+        return (string) end($installed);
+    }
+
+    /**
      * Build the pool configuration for a user. The pool runs as {username} and
      * confines PHP with open_basedir + disabled dangerous functions.
      */

@@ -110,16 +110,42 @@ setup_php_repo() {
 }
 
 # --------------------------------------------------------------------------
-# Detect the PHP-FPM version actually installed (e.g. "8.3"). Falls back to the
-# running php-cli version, then to the requested default.
+# Detect the PHP version to use. Prefer a version that actually has PHP-FPM
+# installed (it has an /etc/php/<v>/fpm directory) because the panel runs every
+# PHP/WordPress site through a per-user PHP-FPM pool. Falls back to any php
+# config dir, then the running php-cli version, then the requested default.
 # --------------------------------------------------------------------------
 detect_php_version() {
     local v
-    v="$(ls /etc/php/ 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+    # 1. Highest version that has PHP-FPM installed (a pool.d dir exists).
+    v="$(ls -d /etc/php/*/fpm/pool.d 2>/dev/null | awk -F/ '{print $4}' \
+         | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+    # 2. Else the highest version that has any /etc/php config dir.
+    [ -z "${v}" ] && v="$(ls /etc/php/ 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+    # 3. Else the running php-cli version.
     if [ -z "${v}" ] && command -v php >/dev/null 2>&1; then
         v="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null)"
     fi
     echo "${v:-${PHP_VERSION_DEFAULT}}"
+}
+
+# Guarantee PHP-FPM (and the extensions the panel needs) for a given version is
+# installed, so /etc/php/<v>/fpm/pool.d exists and per-user pools can be written.
+# This repairs boxes where only the php-cli was pulled in. Returns success only
+# if the pool.d directory exists afterwards.
+ensure_php_fpm_installed() {
+    local v="$1"
+    [ -d "/etc/php/${v}/fpm/pool.d" ] && return 0
+
+    log "Ensuring PHP-FPM ${v} and required extensions are installed…"
+    apt-get install -y \
+        "php${v}-fpm" "php${v}-cli" "php${v}-sqlite3" "php${v}-mysql" "php${v}-curl" \
+        "php${v}-zip" "php${v}-mbstring" "php${v}-xml" "php${v}-bcmath" "php${v}-common" \
+        >/dev/null 2>&1 \
+        || apt-get install -y "php${v}-fpm" >/dev/null 2>&1 \
+        || true
+
+    [ -d "/etc/php/${v}/fpm/pool.d" ]
 }
 
 # Find an existing PHP-FPM unix socket, preferring the detected version.
@@ -261,6 +287,15 @@ php_at_least() {
 if ! php_at_least 80300; then
     die "PHP 8.3+ is required (composer.json needs ^8.3) but $(php -r 'echo PHP_VERSION;') is active. Install/enable PHP 8.3 and retry."
 fi
+
+# The panel runs every PHP/WordPress site through a per-user PHP-FPM pool, which
+# requires /etc/php/<v>/fpm/pool.d to exist. Make sure PHP-FPM for the chosen
+# version is installed (repairs boxes that only got the php-cli), then re-detect.
+if ! ensure_php_fpm_installed "${PHP_VERSION}"; then
+    die "PHP-FPM ${PHP_VERSION} could not be installed (missing /etc/php/${PHP_VERSION}/fpm/pool.d). Install php${PHP_VERSION}-fpm and re-run this installer."
+fi
+PHP_VERSION="$(detect_php_version)"
+ok "PHP-FPM ${PHP_VERSION} is installed (pool dir: /etc/php/${PHP_VERSION}/fpm/pool.d)."
 
 # Make sure the PHP-FPM service for the detected version is enabled and running
 # so the socket exists before we detect it.

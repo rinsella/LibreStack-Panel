@@ -191,13 +191,17 @@ class WebsiteController extends Controller
     {
         $this->authorize('update', $website);
 
-        $result = $this->nginx->deploy($website);
+        // Re-run the full provisioner (idempotent): ensures the system user,
+        // directory tree, per-user PHP-FPM pool and Nginx config all exist. This
+        // recovers sites whose first provisioning failed (e.g. PHP-FPM for the
+        // chosen version was not installed yet).
+        $result = $this->provisioner->provision($website->fresh());
 
         Audit::log('website.redeployed', 'website', (string) $website->id);
 
         return back()->with(
             $result->ok || $result->disabled ? 'success' : 'error',
-            $result->ok || $result->disabled ? 'Nginx config redeployed.' : ('Deploy failed: ' . $result->combined())
+            $result->ok || $result->disabled ? 'Website redeployed.' : ('Deploy failed: ' . $result->combined())
         );
     }
 

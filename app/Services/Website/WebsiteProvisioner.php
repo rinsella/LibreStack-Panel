@@ -61,7 +61,14 @@ class WebsiteProvisioner
         // 3. PHP/WordPress sites get a dedicated per-user PHP-FPM pool so the
         //    site runs as its own user (writable WordPress, plugins, uploads).
         if ($this->needsPhpFpmPool($website)) {
-            $pool = $this->phpFpm->ensurePool($website->system_username, $this->phpVersion($website));
+            // Coerce the site to a PHP version whose FPM is actually installed,
+            // then persist it so the config + future operations stay consistent.
+            $version = $this->phpVersion($website);
+            if ($version !== (string) $website->php_version) {
+                $website->forceFill(['php_version' => $version])->save();
+            }
+
+            $pool = $this->phpFpm->ensurePool($website->system_username, $version);
             if (! $pool->ok && ! $pool->disabled) {
                 return $pool;
             }
@@ -84,7 +91,9 @@ class WebsiteProvisioner
 
     protected function phpVersion(Website $website): string
     {
-        return (string) ($website->php_version ?: config('librestack.default_php'));
+        $preferred = (string) ($website->php_version ?: config('librestack.default_php'));
+
+        return $this->phpFpm->resolveInstalledVersion($preferred);
     }
 
     public function createDirectories(Website $website): CommandResult

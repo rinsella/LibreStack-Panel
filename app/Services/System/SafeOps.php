@@ -468,7 +468,19 @@ class SafeOps
         $dir = dirname($path);
 
         if (! is_dir($dir)) {
-            throw new RuntimeException("PHP-FPM pool directory does not exist: {$dir}");
+            // pool.d is normally created by the phpX.Y-fpm package. If the FPM
+            // base dir exists but pool.d is somehow missing, recreate it;
+            // otherwise PHP-FPM for this version simply isn't installed.
+            $fpmBase = dirname($dir); // /etc/php/{version}/fpm
+            if (is_dir($fpmBase)) {
+                @mkdir($dir, 0755, true);
+            }
+        }
+        if (! is_dir($dir)) {
+            throw new RuntimeException(
+                "PHP-FPM {$phpVersion} is not installed (missing {$dir}). "
+                . "Install php{$phpVersion}-fpm and try again."
+            );
         }
         if (file_put_contents($path, $poolConfig) === false) {
             throw new RuntimeException("Failed to write PHP-FPM pool: {$path}");
