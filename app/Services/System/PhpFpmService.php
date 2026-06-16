@@ -142,7 +142,49 @@ CONF;
             return $test;
         }
 
+        // Drop any orphan pools this user still has under OTHER PHP versions.
+        // Every version's pool listens on the same per-user socket, so a stale
+        // pool (e.g. left behind when the site's PHP version changed) keeps
+        // binding the socket with old/default php.ini limits — which is why a
+        // saved upload_max_filesize never takes effect. Removing them ensures
+        // only the active version, carrying the new settings, serves the site.
+        $this->pruneOtherVersionPools($username, $phpVersion);
+
         return $this->fs->phpFpmReload($phpVersion);
+    }
+
+    /**
+     * Remove the user's pool file from every installed PHP version other than
+     * the active one, reloading each version whose pool was actually removed so
+     * the orphaned pool stops binding the shared per-user socket.
+     */
+    protected function pruneOtherVersionPools(string $username, string $activeVersion): void
+    {
+        foreach ($this->installedVersions() as $version) {
+            if ($version === $activeVersion) {
+                continue;
+            }
+
+            // Only touch a version that genuinely has a leftover pool for this
+            // user; reloading a version with no orphan would needlessly restart
+            // PHP-FPM for every other site running on it.
+            if (! $this->poolFileExists($username, $version)) {
+                continue;
+            }
+
+            $delete = $this->fs->phpFpmPoolDelete($username, $version);
+            if ($delete->ok || $delete->disabled) {
+                $this->fs->phpFpmReload($version);
+            }
+        }
+    }
+
+    /**
+     * Whether the user's pool file currently exists under a given PHP version.
+     */
+    protected function poolFileExists(string $username, string $phpVersion): bool
+    {
+        return is_file("/etc/php/{$phpVersion}/fpm/pool.d/librestack-{$username}.conf");
     }
 
     /**

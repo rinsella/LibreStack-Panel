@@ -218,4 +218,67 @@ class PhpFpmPoolTest extends TestCase
 
         $this->assertSame('8.4', $service->resolveInstalledVersion('8.4'));
     }
+
+    public function test_ensure_pool_prunes_orphan_pools_from_other_php_versions(): void
+    {
+        config(['librestack.system_enabled' => true]);
+
+        // FS that records which versions were deleted/reloaded so we can assert
+        // the orphan pool (8.3) is removed while the active version (8.5) stays.
+        $fs = new class(app(CommandRunner::class), app(SafeOps::class)) extends PrivilegedFs {
+            /** @var array<int, string> */
+            public array $deleted = [];
+
+            /** @var array<int, string> */
+            public array $reloaded = [];
+
+            public function phpFpmPoolWrite(string $username, string $phpVersion, string $poolConfig): CommandResult
+            {
+                return new CommandResult(true, 0, 'ok', '');
+            }
+
+            public function phpFpmTest(string $phpVersion): CommandResult
+            {
+                return new CommandResult(true, 0, 'ok', '');
+            }
+
+            public function phpFpmPoolDelete(string $username, string $phpVersion): CommandResult
+            {
+                $this->deleted[] = $phpVersion;
+
+                return new CommandResult(true, 0, 'ok', '');
+            }
+
+            public function phpFpmReload(string $phpVersion): CommandResult
+            {
+                $this->reloaded[] = $phpVersion;
+
+                return new CommandResult(true, 0, 'ok', '');
+            }
+        };
+
+        // The host has 8.3 and 8.5 installed; only 8.3 still carries an orphan
+        // pool for this user (the site was moved from 8.3 to 8.5).
+        $service = new class($fs) extends PhpFpmService {
+            public function installedVersions(): array
+            {
+                return ['8.3', '8.5'];
+            }
+
+            protected function poolFileExists(string $username, string $phpVersion): bool
+            {
+                return $phpVersion === '8.3';
+            }
+        };
+
+        $result = $service->ensurePool('webuser', '8.5', ['upload_max_filesize' => '800M']);
+
+        $this->assertTrue($result->ok);
+        // The stale 8.3 pool is deleted; the active 8.5 pool is never deleted.
+        $this->assertSame(['8.3'], $fs->deleted);
+        // Both the orphan's version and the active version are reloaded so the
+        // socket ends up bound by the 8.5 pool carrying the new settings.
+        $this->assertContains('8.3', $fs->reloaded);
+        $this->assertContains('8.5', $fs->reloaded);
+    }
 }
