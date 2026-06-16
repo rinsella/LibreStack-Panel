@@ -4,19 +4,29 @@ namespace App\Services\SSL;
 
 use App\Models\SslCertificate;
 use App\Models\Website;
+use App\Services\Nginx\NginxService;
 use App\Services\Support\CommandResult;
 use App\Services\Support\CommandRunner;
 use App\Support\Validators;
 use InvalidArgumentException;
 
 /**
- * Issues and manages Let's Encrypt certificates via certbot's nginx plugin.
+ * Issues and manages Let's Encrypt certificates with certbot.
+ *
+ * Certificates are obtained with `certbot certonly --webroot`, which only writes
+ * the cert to /etc/letsencrypt and NEVER edits nginx. The panel then regenerates
+ * the site's vhost itself (NginxService emits the :443 server block), so a later
+ * redeploy (e.g. saving PHP settings) can never clobber the HTTPS config — which
+ * is exactly what happened with the old `--nginx` installer flow.
+ *
  * Domains and email are strictly validated before any command is built.
  */
 class SslService
 {
-    public function __construct(protected CommandRunner $runner)
-    {
+    public function __construct(
+        protected CommandRunner $runner,
+        protected NginxService $nginx,
+    ) {
     }
 
     public function issue(Website $website, string $email): CommandResult
@@ -28,23 +38,34 @@ class SslService
             throw new InvalidArgumentException('Invalid email.');
         }
 
-        $args = [
-            '--nginx',
-            '-d', $website->domain,
-            '--non-interactive',
-            '--agree-tos',
-            '-m', $email,
-            '--redirect',
-        ];
-
+        // -d flags: primary domain (+ www when the alias is enabled). The webroot
+        // is the live document root, where the current :80 vhost already serves
+        // /.well-known/acme-challenge for the http-01 challenge.
+        $domains = ['-d', $website->domain];
         if ($website->www_alias) {
-            // Insert www domain right after the primary -d flag.
-            array_splice($args, 3, 0, ['-d', 'www.' . $website->domain]);
+            $domains[] = '-d';
+            $domains[] = 'www.' . $website->domain;
         }
+
+        $args = array_merge(
+            ['certonly', '--webroot', '-w', $website->document_root],
+            $domains,
+            ['--non-interactive', '--agree-tos', '-m', $email, '--keep-until-expiring'],
+        );
 
         $result = $this->runner->run('certbot', $args, 180);
 
         $this->record($website, $result->ok ? 'active' : 'failed', $email);
+
+        // On success, regenerate the vhost so it gains the panel-owned HTTPS
+        // server block (cert paths, body size, per-user FPM socket) and the
+        // :80 → :443 redirect.
+        if ($result->ok && ! $result->disabled) {
+            $deploy = $this->nginx->deploy($website->fresh());
+            if (! $deploy->ok && ! $deploy->disabled) {
+                return $deploy;
+            }
+        }
 
         return $result;
     }
@@ -61,6 +82,8 @@ class SslService
 
         if ($result->ok) {
             $this->record($website, 'active');
+            // Reload nginx so the freshly renewed certificate is picked up.
+            $this->nginx->reload();
         }
 
         return $result;
@@ -77,7 +100,11 @@ class SslService
         ], 60);
 
         SslCertificate::where('website_id', $website->id)->delete();
-        $website->update(['ssl_enabled' => false]);
+        $website->update(['ssl_enabled' => false, 'force_https' => false]);
+
+        // Regenerate the vhost without the HTTPS block so the site keeps serving
+        // over plain :80 instead of pointing at a now-missing certificate.
+        $this->nginx->deploy($website->fresh());
 
         return $result;
     }

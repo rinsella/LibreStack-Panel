@@ -37,7 +37,14 @@ class NginxService
     }
 
     /**
-     * Build the full Nginx config text for a website (pure function).
+     * Build the full Nginx config text for a website.
+     *
+     * The per-type builders only produce the *body* of a server block (root,
+     * locations, fastcgi, …). renderServer() then wraps that body in the right
+     * listen blocks: a plain :80 server, or — when the site has a working TLS
+     * certificate — a :80 → :443 redirect plus a :443 server carrying the same
+     * body. The panel therefore OWNS the HTTPS vhost, so redeploys (e.g. saving
+     * PHP settings) never wipe out the SSL server block.
      */
     public function generateConfig(Website $website): string
     {
@@ -45,12 +52,112 @@ class NginxService
             throw new InvalidArgumentException("Invalid domain: {$website->domain}");
         }
 
-        return match ($website->type) {
-            'static'                       => $this->staticConfig($website),
-            'php', 'wordpress'             => $this->phpConfig($website),
-            'reverse_proxy', 'node_proxy'  => $this->proxyConfig($website),
-            default                        => $this->staticConfig($website),
+        $body = match ($website->type) {
+            'static'                       => $this->staticBody($website),
+            'php', 'wordpress'             => $this->phpBody($website),
+            'reverse_proxy', 'node_proxy'  => $this->proxyBody($website),
+            default                        => $this->staticBody($website),
         };
+
+        return $this->renderServer($website, $body);
+    }
+
+    /**
+     * Whether to emit an HTTPS server block for this site. The site must be
+     * flagged ssl_enabled AND have a certificate on disk. In dev (system
+     * commands disabled) there is no /etc/letsencrypt to read, so we trust the
+     * flag — that keeps generated previews/tests meaningful without a real cert.
+     */
+    protected function sslActive(Website $website): bool
+    {
+        if (! $website->ssl_enabled) {
+            return false;
+        }
+
+        if (! $this->runner->isEnabled()) {
+            return true;
+        }
+
+        return is_file($this->sslCertPath($website->domain));
+    }
+
+    protected function sslCertPath(string $domain): string
+    {
+        return "/etc/letsencrypt/live/{$domain}/fullchain.pem";
+    }
+
+    protected function sslKeyPath(string $domain): string
+    {
+        return "/etc/letsencrypt/live/{$domain}/privkey.pem";
+    }
+
+    /**
+     * Wrap a server-block body in the appropriate listen blocks.
+     */
+    protected function renderServer(Website $website, string $body): string
+    {
+        $names = $this->serverNames($website);
+
+        if (! $this->sslActive($website)) {
+            return $this->header($website) . $this->plainServer($names, $body);
+        }
+
+        // TLS is active: redirect (or still serve) :80 and serve the body on :443.
+        $out = $this->header($website);
+        $out .= $website->force_https
+            ? $this->redirectServer($website, $names)
+            : $this->plainServer($names, $body);
+        $out .= $this->tlsServer($website, $names, $body);
+
+        return $out;
+    }
+
+    protected function plainServer(string $names, string $body): string
+    {
+        return "server {\n"
+            . "    listen 80;\n"
+            . "    listen [::]:80;\n"
+            . "    server_name {$names};\n\n"
+            . $body
+            . "}\n";
+    }
+
+    /**
+     * A :80 server that serves the ACME http-01 challenge (so certbot can renew
+     * over webroot) and redirects everything else to HTTPS.
+     */
+    protected function redirectServer(Website $website, string $names): string
+    {
+        $docroot = $website->document_root;
+
+        return "server {\n"
+            . "    listen 80;\n"
+            . "    listen [::]:80;\n"
+            . "    server_name {$names};\n\n"
+            . "    location /.well-known/acme-challenge/ {\n"
+            . "        root {$docroot};\n"
+            . "    }\n\n"
+            . "    location / {\n"
+            . "        return 301 https://\$host\$request_uri;\n"
+            . "    }\n"
+            . "}\n";
+    }
+
+    protected function tlsServer(Website $website, string $names, string $body): string
+    {
+        $cert = $this->sslCertPath($website->domain);
+        $key = $this->sslKeyPath($website->domain);
+
+        return "server {\n"
+            . "    listen 443 ssl;\n"
+            . "    listen [::]:443 ssl;\n"
+            . "    server_name {$names};\n\n"
+            . "    ssl_certificate {$cert};\n"
+            . "    ssl_certificate_key {$key};\n"
+            . "    ssl_protocols TLSv1.2 TLSv1.3;\n"
+            . "    ssl_prefer_server_ciphers off;\n\n"
+            . $body
+            . "}\n";
     }
 
     protected function serverNames(Website $website): string
@@ -83,36 +190,25 @@ class NginxService
             . "    error_log {$logDir}/error.log;\n";
     }
 
-    protected function staticConfig(Website $website): string
+    protected function staticBody(Website $website): string
     {
         $root = $website->document_root;
 
-        return $this->header($website)
-            . "server {\n"
-            . "    listen 80;\n"
-            . "    listen [::]:80;\n"
-            . "    server_name {$this->serverNames($website)};\n\n"
-            . "    root {$root};\n"
+        return "    root {$root};\n"
             . "    index index.html index.htm;\n\n"
             . $this->logBlock($website) . "\n"
             . "    location / {\n"
             . "        try_files \$uri \$uri/ =404;\n"
-            . "    }\n"
-            . "}\n";
+            . "    }\n";
     }
 
-    protected function phpConfig(Website $website): string
+    protected function phpBody(Website $website): string
     {
         $root = $website->document_root;
         $socket = $this->fpmSocket($website);
         $bodySize = \App\Services\System\PhpSettings::nginxBodySize($website->phpSettings());
 
-        return $this->header($website)
-            . "server {\n"
-            . "    listen 80;\n"
-            . "    listen [::]:80;\n"
-            . "    server_name {$this->serverNames($website)};\n\n"
-            . "    root {$root};\n"
+        return "    root {$root};\n"
             . "    index index.php index.html;\n\n"
             . "    client_max_body_size {$bodySize};\n\n"
             . $this->logBlock($website) . "\n"
@@ -125,8 +221,7 @@ class NginxService
             . "    }\n\n"
             . "    location ~ /\\.(?!well-known).* {\n"
             . "        deny all;\n"
-            . "    }\n"
-            . "}\n";
+            . "    }\n";
     }
 
     /**
@@ -146,7 +241,7 @@ class NginxService
         return "unix:/run/php/librestack-{$username}.sock";
     }
 
-    protected function proxyConfig(Website $website): string
+    protected function proxyBody(Website $website): string
     {
         $upstream = $website->upstream_url ?: 'http://127.0.0.1:3000';
         $ws = $website->websocket
@@ -154,12 +249,7 @@ class NginxService
               . "        proxy_set_header Connection \"upgrade\";\n"
             : '';
 
-        return $this->header($website)
-            . "server {\n"
-            . "    listen 80;\n"
-            . "    listen [::]:80;\n"
-            . "    server_name {$this->serverNames($website)};\n\n"
-            . $this->logBlock($website) . "\n"
+        return $this->logBlock($website) . "\n"
             . "    location / {\n"
             . "        proxy_pass {$upstream};\n"
             . "        proxy_http_version 1.1;\n"
@@ -168,8 +258,7 @@ class NginxService
             . "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;\n"
             . "        proxy_set_header X-Forwarded-Proto \$scheme;\n"
             . $ws
-            . "    }\n"
-            . "}\n";
+            . "    }\n";
     }
 
     /**
