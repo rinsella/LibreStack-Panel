@@ -495,7 +495,11 @@ Group=${SERVICE_USER}
 Restart=always
 RestartSec=3
 WorkingDirectory=${APP_DIR}
-ExecStart=/usr/bin/php ${APP_DIR}/artisan queue:work --sleep=3 --tries=3 --timeout=600
+# --max-time/--max-jobs make each worker process exit periodically; systemd then
+# respawns it. This recycles memory AND guarantees the worker picks up new code
+# soon after a deploy even if only 'git pull' was run (a long-running worker
+# otherwise keeps STALE code/config in memory and silently ignores new features).
+ExecStart=/usr/bin/php ${APP_DIR}/artisan queue:work --sleep=3 --tries=3 --timeout=600 --max-time=3600 --max-jobs=500
 
 [Install]
 WantedBy=multi-user.target
