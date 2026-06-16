@@ -133,12 +133,32 @@ detect_php_version() {
 # installed, so /etc/php/<v>/fpm/pool.d exists and per-user pools can be written.
 # This repairs boxes where only the php-cli was pulled in (e.g. as a composer
 # dependency). Errors are shown, not swallowed, so a genuine failure is visible.
+# Install one PHP version's FPM package (critical) in isolation, then its panel
+# extensions best-effort. Isolating the -fpm package means a single missing
+# extension can never prevent the pool.d directory from being created. Returns
+# success iff /etc/php/<v>/fpm/pool.d exists afterwards.
+install_php_fpm_version() {
+    local cv="$1"
+    apt-get install -y "php${cv}-fpm" || return 1
+    # Extensions the panel/WordPress need — best-effort, never fatal.
+    local ext
+    for ext in cli sqlite3 mysql curl zip mbstring xml bcmath common gd intl; do
+        apt-get install -y "php${cv}-${ext}" >/dev/null 2>&1 || true
+    done
+    [ -d "/etc/php/${cv}/fpm/pool.d" ]
+}
+
+# Guarantee PHP-FPM (and the extensions the panel needs) is installed, so
+# /etc/php/<v>/fpm/pool.d exists and per-user pools can be written. This repairs
+# boxes where only the php-cli was pulled in (e.g. as a composer dependency) and
+# adapts to brand-new distros that ship a newer default (e.g. Ubuntu 26.04 →
+# php8.5). Errors are shown, not swallowed, so a genuine failure is visible.
 # Returns success only if some FPM pool.d directory exists afterwards.
 ensure_php_fpm_installed() {
     local v="$1"
     [ -d "/etc/php/${v}/fpm/pool.d" ] && return 0
 
-    log "Ensuring PHP-FPM ${v} and required extensions are installed…"
+    log "Ensuring PHP-FPM and required extensions are installed…"
 
     # php*-fpm lives in the 'universe' component on Ubuntu; make sure it's on.
     if [ "${ID}" = "ubuntu" ] && command -v add-apt-repository >/dev/null 2>&1; then
@@ -146,40 +166,31 @@ ensure_php_fpm_installed() {
     fi
     apt-get update -y || warn "apt-get update reported errors; continuing best-effort."
 
-    # 1. Try the requested version's FPM + extensions.
-    apt-get install -y \
-        "php${v}-fpm" "php${v}-cli" "php${v}-sqlite3" "php${v}-mysql" "php${v}-curl" \
-        "php${v}-zip" "php${v}-mbstring" "php${v}-xml" "php${v}-bcmath" "php${v}-common" \
-        || apt-get install -y "php${v}-fpm" || true
-    [ -d "/etc/php/${v}/fpm/pool.d" ] && return 0
+    # 1. Try the requested version.
+    install_php_fpm_version "${v}" && return 0
 
-    # 2. Try the generic php-fpm metapackage (tracks the distro default version).
-    log "php${v}-fpm unavailable; trying the generic php-fpm metapackage…"
-    apt-get install -y php-fpm php-cli php-sqlite3 php-mysql php-curl \
-        php-zip php-mbstring php-xml php-bcmath php-common || true
-    [ -n "$(ls -d /etc/php/*/fpm/pool.d 2>/dev/null)" ] && return 0
-
-    # 3. Last resort: discover ANY phpX.Y-fpm package the archive actually
-    #    publishes (a brand-new distro may ship e.g. php8.5-fpm) and install it
-    #    plus the matching extensions.
+    # 2. Discover the version this archive actually publishes (e.g. php8.5-fpm on
+    #    a distro whose default PHP moved past the requested version) and install
+    #    that. Pick the highest available.
     local cand cv
     cand="$(apt-cache search --names-only '^php[0-9]+\.[0-9]+-fpm$' 2>/dev/null \
             | awk '{print $1}' | sort -V | tail -n1)"
     if [ -n "${cand}" ]; then
         cv="${cand#php}"; cv="${cv%-fpm}"
-        log "Installing the PHP-FPM version available in this archive: ${cand} (PHP ${cv})…"
-        apt-get install -y \
-            "php${cv}-fpm" "php${cv}-cli" "php${cv}-sqlite3" "php${cv}-mysql" "php${cv}-curl" \
-            "php${cv}-zip" "php${cv}-mbstring" "php${cv}-xml" "php${cv}-bcmath" "php${cv}-common" \
-            || apt-get install -y "${cand}" || true
+        if [ "${cv}" != "${v}" ]; then
+            log "php${v}-fpm is unavailable; using the version this OS ships: ${cand} (PHP ${cv})…"
+        fi
+        install_php_fpm_version "${cv}" && return 0
     fi
 
-    if [ -z "$(ls -d /etc/php/*/fpm/pool.d 2>/dev/null)" ]; then
-        warn "No PHP-FPM package could be installed. Diagnostics:"
-        echo "    apt-cache policy php${v}-fpm:"; apt-cache policy "php${v}-fpm" 2>/dev/null | sed 's/^/      /' || true
-        echo "    php*-fpm packages available in this archive:"
-        apt-cache search --names-only '^php[0-9.]*-fpm$' 2>/dev/null | sed 's/^/      /' || true
-    fi
+    # 3. Fall back to the generic php-fpm metapackage (tracks the distro default).
+    log "Trying the generic php-fpm metapackage…"
+    apt-get install -y php-fpm || true
+    [ -n "$(ls -d /etc/php/*/fpm/pool.d 2>/dev/null)" ] && return 0
+
+    warn "No PHP-FPM package could be installed. Diagnostics:"
+    echo "    php*-fpm packages available in this archive:"
+    apt-cache search --names-only '^php[0-9.]*-fpm$' 2>/dev/null | sed 's/^/      /' || true
 
     # Success if any FPM pool dir now exists.
     [ -n "$(ls -d /etc/php/*/fpm/pool.d 2>/dev/null)" ]
@@ -284,10 +295,23 @@ PACKAGES=(
 # Fall back to distro default php-* metapackages if the versioned ones are absent.
 if ! apt-get install -y "${PACKAGES[@]}"; then
     warn "Versioned PHP packages unavailable; falling back to generic php-* metapackages."
-    apt-get install -y nginx php-cli php-fpm php-sqlite3 php-mysql php-curl php-zip \
+    if ! apt-get install -y nginx php-cli php-fpm php-sqlite3 php-mysql php-curl php-zip \
         php-mbstring php-xml php-bcmath php-common composer nodejs npm mariadb-server \
-        certbot python3-certbot-nginx cron unzip curl git ufw sudo
+        certbot python3-certbot-nginx cron unzip curl git ufw sudo; then
+        # A brand-new distro may rename/withhold a package, which would abort the
+        # whole atomic install. Install each package best-effort so one missing
+        # name doesn't block the rest; PHP-FPM is guaranteed separately below.
+        warn "Some packages were unavailable as a group; installing them individually (best-effort)…"
+        for pkg in nginx php-cli php-fpm php-sqlite3 php-mysql php-curl php-zip \
+                   php-mbstring php-xml php-bcmath php-common composer nodejs npm \
+                   mariadb-server certbot python3-certbot-nginx cron unzip curl git ufw sudo; do
+            apt-get install -y "${pkg}" >/dev/null 2>&1 || warn "  could not install: ${pkg}"
+        done
+    fi
 fi
+
+# Critical packages the panel cannot run without.
+command -v nginx >/dev/null 2>&1 || die "nginx is required but could not be installed."
 
 # sudo is mandatory: the panel performs all privileged work through it.
 command -v sudo >/dev/null 2>&1 || die "sudo is required but could not be installed."
