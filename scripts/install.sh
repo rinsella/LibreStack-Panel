@@ -131,21 +131,40 @@ detect_php_version() {
 
 # Guarantee PHP-FPM (and the extensions the panel needs) for a given version is
 # installed, so /etc/php/<v>/fpm/pool.d exists and per-user pools can be written.
-# This repairs boxes where only the php-cli was pulled in. Returns success only
-# if the pool.d directory exists afterwards.
+# This repairs boxes where only the php-cli was pulled in (e.g. as a composer
+# dependency). Errors are shown, not swallowed, so a genuine failure is visible.
+# Returns success only if the pool.d directory exists afterwards.
 ensure_php_fpm_installed() {
     local v="$1"
     [ -d "/etc/php/${v}/fpm/pool.d" ] && return 0
 
     log "Ensuring PHP-FPM ${v} and required extensions are installed…"
+
+    # php*-fpm lives in the 'universe' component on Ubuntu; make sure it's on.
+    if [ "${ID}" = "ubuntu" ] && command -v add-apt-repository >/dev/null 2>&1; then
+        add-apt-repository -y universe >/dev/null 2>&1 || true
+    fi
+    apt-get update -y || warn "apt-get update reported errors; continuing best-effort."
+
+    # Try the versioned FPM + extensions first, then just the FPM package, then
+    # the generic php-fpm metapackage. Show apt's output so failures are visible.
     apt-get install -y \
         "php${v}-fpm" "php${v}-cli" "php${v}-sqlite3" "php${v}-mysql" "php${v}-curl" \
         "php${v}-zip" "php${v}-mbstring" "php${v}-xml" "php${v}-bcmath" "php${v}-common" \
-        >/dev/null 2>&1 \
-        || apt-get install -y "php${v}-fpm" >/dev/null 2>&1 \
+        || apt-get install -y "php${v}-fpm" \
+        || apt-get install -y php-fpm \
         || true
 
-    [ -d "/etc/php/${v}/fpm/pool.d" ]
+    if [ ! -d "/etc/php/${v}/fpm/pool.d" ]; then
+        warn "Could not install php${v}-fpm. apt knows the package as:"
+        apt-cache policy "php${v}-fpm" 2>/dev/null | sed 's/^/    /' || true
+        # A different FPM version may have landed (e.g. generic php-fpm pulled a
+        # newer one); report whatever pool.d now exists so the caller can adapt.
+        ls -d /etc/php/*/fpm/pool.d 2>/dev/null | sed 's/^/    available: /' || true
+    fi
+
+    # Success if the requested version's pool dir exists OR any FPM pool dir does.
+    [ -d "/etc/php/${v}/fpm/pool.d" ] || [ -n "$(ls -d /etc/php/*/fpm/pool.d 2>/dev/null)" ]
 }
 
 # Find an existing PHP-FPM unix socket, preferring the detected version.
